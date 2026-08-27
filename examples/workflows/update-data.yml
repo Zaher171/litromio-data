@@ -1,0 +1,128 @@
+# Ejemplo — NO activar: mantener fuera de .github/workflows hasta autorización
+#
+# Copiar a .github/workflows/update-data.yml SOLO tras:
+# - revisar este archivo
+# - configurar secrets (más adelante; no se solicitan en esta fase)
+# - probar con workflow_dispatch antes de habilitar schedule
+#
+# Cron fuera de :00. Puede retrasarse u omitirse bajo carga (sin SLA).
+# Runners estándar en repo público: minutos Actions no consumen cupo Free de privados.
+# No usar commits artificiales para eludir desactivación por inactividad (60 días).
+#
+# SHAs verificados (2026-08-27) vía API de GitHub:
+# - actions/checkout@v4.2.2 → 11bd71901bbe5b1630ceea73d27597364c9af683
+# - actions/setup-node@v4.4.0 → 49933ea5288caeca8642d1e84afbd3f7d6820020
+
+name: update-litromio-data
+
+on:
+  workflow_dispatch:
+    inputs:
+      allow_empty_publish:
+        description: 'Primer arranque explícito (sin estado publicado previo). No usar si falló el recover.'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+  # Descomentar solo tras prueba manual exitosa y autorización:
+  # schedule:
+  #   - cron: '17,47 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: litromio-data-update
+  cancel-in-progress: false
+
+env:
+  # Configurar en el repo público cuando exista la URL real. No inventar aquí.
+  # Ejemplo futuro: https://litromio-data.<cuenta>.workers.dev
+  PUBLIC_DATA_BASE_URL: ${{ vars.PUBLIC_DATA_BASE_URL }}
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      outcome: ${{ steps.pipeline.outputs.outcome }}
+      needs_deploy: ${{ steps.pipeline.outputs.needs_deploy }}
+      dataset_version: ${{ steps.pipeline.outputs.dataset_version }}
+      content_hash: ${{ steps.pipeline.outputs.content_hash }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Check
+        run: npm run check
+
+      - name: Test
+        run: npm test
+
+      - name: Recover published state
+        id: recover
+        if: ${{ env.PUBLIC_DATA_BASE_URL != '' && inputs.allow_empty_publish != 'true' }}
+        run: |
+          npx tsx src/cli.ts recover --public-base-url "$PUBLIC_DATA_BASE_URL" --out ./out
+        continue-on-error: false
+
+      - name: Require prior state or explicit bootstrap
+        if: ${{ env.PUBLIC_DATA_BASE_URL == '' && inputs.allow_empty_publish != 'true' }}
+        run: |
+          echo "PUBLIC_DATA_BASE_URL no configurada y allow_empty_publish=false."
+          echo "Configura la variable del repo o dispara con allow_empty_publish=true (solo primer despliegue)."
+          exit 1
+
+      - name: Download, validate, generate (local out/)
+        id: pipeline
+        env:
+          ALLOW_EMPTY: ${{ inputs.allow_empty_publish }}
+        run: |
+          set -euo pipefail
+          EXTRA=()
+          if [ "$ALLOW_EMPTY" = "true" ]; then
+            EXTRA+=(--allow-empty-publish)
+          fi
+          # Generación local: escribe ./out/live. No despliega.
+          # Sin --dev-fixtures: umbral nacional de producción.
+          npx tsx src/cli.ts pipeline --input download --out ./out "${EXTRA[@]}" | tee pipeline-result.json
+          OUTCOME=$(node -e "const j=require('./pipeline-result.json'); process.stdout.write(j.outcome)")
+          NEEDS=$(node -e "const j=require('./pipeline-result.json'); process.stdout.write(String(j.needsDeploy))")
+          DVER=$(node -e "const j=require('./pipeline-result.json'); process.stdout.write(j.datasetVersion||'')")
+          CHASH=$(node -e "const j=require('./pipeline-result.json'); process.stdout.write(j.contentHash||'')")
+          echo "outcome=$OUTCOME" >> "$GITHUB_OUTPUT"
+          echo "needs_deploy=$NEEDS" >> "$GITHUB_OUTPUT"
+          echo "dataset_version=$DVER" >> "$GITHUB_OUTPUT"
+          echo "content_hash=$CHASH" >> "$GITHUB_OUTPUT"
+          case "$OUTCOME" in
+            published|synced_unchanged) ;;
+            *) echo "Pipeline no publicable: $OUTCOME"; exit 1 ;;
+          esac
+
+      - name: Deploy assets (DESACTIVADO hasta autorización)
+        # Distinto de la generación local. Requiere secrets futuros y autorización explícita.
+        # Tras activar: comprobar HTTP GET $PUBLIC_DATA_BASE_URL/current.json (200, JSON válido,
+        # datasetVersion = outputs.dataset_version) y /sync.json (lastSuccessfulFetchAt reciente).
+        if: ${{ false }}
+        run: npx wrangler deploy --config wrangler.jsonc
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Summary
+        run: |
+          echo "outcome=${{ steps.pipeline.outputs.outcome }}"
+          echo "needs_deploy=${{ steps.pipeline.outputs.needs_deploy }}"
+          echo "dataset_version=${{ steps.pipeline.outputs.dataset_version }}"
+          echo "Nota: synced_unchanged también necesita deploy de metadatos (sync/frescura)."

@@ -1,0 +1,20 @@
+# Cabeceras para Static Assets (Workers).
+# Se copia a out/live en cada publicación. No inventar orígenes concretos.
+# CORS: la app privada consumirá JSON desde otro origen.
+
+/*
+  Access-Control-Allow-Origin: *
+  Access-Control-Allow-Methods: GET, HEAD, OPTIONS
+  Access-Control-Allow-Headers: Content-Type, If-None-Match
+
+/current.json
+  Cache-Control: public, max-age=60, must-revalidate
+
+/manifest.json
+  Cache-Control: public, max-age=60, must-revalidate
+
+/sync.json
+  Cache-Control: public, max-age=60, must-revalidate
+
+/v/*
+  Cache-Control: public, max-age=31536000, immutable

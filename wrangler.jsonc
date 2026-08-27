@@ -1,0 +1,23 @@
+/**
+ * Worker independiente solo para Static Assets (JSON públicos).
+ * Sin account_id, sin tokens, sin R2/KV/D1.
+ * La publicación remota queda PENDIENTE de revisión y credenciales.
+ *
+ * assets.directory apunta al árbol listo para servir (p. ej. out/live tras pipeline local).
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "litromio-data",
+  "compatibility_date": "2026-08-27",
+  "main": "src/worker-stub.ts",
+  "assets": {
+    "directory": "./out/live",
+    "binding": "ASSETS",
+    // Servir estáticos sin invocar el Worker en cada petición (cuota Free de requests).
+    "not_found_handling": "none",
+    "run_worker_first": false
+  },
+  "observability": {
+    "enabled": false
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "litromio-data",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Pipeline público de descarga, validación y generación de JSON de precios oficiales (España). Independiente de la app Litromio.",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "generate": "tsx src/cli.ts generate",
+    "pipeline": "tsx src/cli.ts pipeline",
+    "measure": "tsx src/cli.ts measure"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.127.0"
+  }
+}
