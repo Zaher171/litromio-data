@@ -1,0 +1,467 @@
+# Actualización manual de litromio-data (CDN ya publicado).
+# Solo workflow_dispatch — schedule desactivado hasta autorización explícita.
+#
+# SHAs verificados (2026-08-27) vía API de GitHub:
+# - actions/checkout@v4.2.2 → 11bd71901bbe5b1630ceea73d27597364c9af683
+# - actions/setup-node@v4.4.0 → 49933ea5288caeca8642d1e84afbd3f7d6820020
+
+name: update-litromio-data
+
+on:
+  workflow_dispatch:
+  # schedule desactivado (no habilitar sin autorización):
+  # schedule:
+  #   - cron: '17,47 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: litromio-data-update
+  cancel-in-progress: false
+
+env:
+  PUBLIC_DATA_BASE_URL: ${{ vars.PUBLIC_DATA_BASE_URL }}
+  EXPECTED_WORKER_NAME: litromio-data
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      outcome: ${{ steps.pipeline.outputs.outcome }}
+      needs_deploy: ${{ steps.pipeline.outputs.needs_deploy }}
+      dataset_version: ${{ steps.pipeline.outputs.dataset_version }}
+      content_hash: ${{ steps.pipeline.outputs.content_hash }}
+      last_successful_fetch_at: ${{ steps.pipeline.outputs.last_successful_fetch_at }}
+      deployed: ${{ steps.deploy.outputs.deployed }}
+      verified: ${{ steps.verify.outputs.verified }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Check
+        run: npm run check
+
+      - name: Test
+        run: npm test
+
+      - name: Require PUBLIC_DATA_BASE_URL
+        run: |
+          set -euo pipefail
+          if [ -z "${PUBLIC_DATA_BASE_URL:-}" ]; then
+            echo "PUBLIC_DATA_BASE_URL no configurada. Sin bootstrap: recover obligatorio."
+            exit 1
+          fi
+          echo "PUBLIC_DATA_BASE_URL configurada (valor no se imprime completo por seguridad de logs)."
+          echo "base_host=$(node -e "process.stdout.write(new URL(process.env.PUBLIC_DATA_BASE_URL).host)")"
+
+      - name: Recover published state
+        id: recover
+        run: |
+          set -euo pipefail
+          # Obligatorio: si falla, no se genera ni se despliega (no bootstrap).
+          npx tsx src/cli.ts recover --public-base-url "$PUBLIC_DATA_BASE_URL" --out ./out | tee recover-result.json
+          node <<'NODE'
+          const fs = require('node:fs');
+          const raw = fs.readFileSync('recover-result.json', 'utf8');
+          let j;
+          try { j = JSON.parse(raw); } catch (e) {
+            console.error('recover-result.json no es JSON válido');
+            process.exit(1);
+          }
+          if (!j || typeof j !== 'object' || Array.isArray(j)) {
+            console.error('recover: resultado no es objeto');
+            process.exit(1);
+          }
+          if (j.outcome !== 'recovered') {
+            console.error('recover: outcome inesperado:', j.outcome);
+            process.exit(1);
+          }
+          if (typeof j.datasetVersion !== 'string' || !/^[0-9a-f]{16}$/.test(j.datasetVersion)) {
+            console.error('recover: datasetVersion inválido');
+            process.exit(1);
+          }
+          if (typeof j.fileCount !== 'number' || j.fileCount < 1) {
+            console.error('recover: fileCount inválido');
+            process.exit(1);
+          }
+          console.log(`recover ok: version=${j.datasetVersion} files=${j.fileCount}`);
+          NODE
+
+      - name: Download, validate, generate
+        id: pipeline
+        run: |
+          set -euo pipefail
+          # Mismo ./out que recover: conserva estado previo y v/ inmutables.
+          # Sin --allow-empty-publish y sin --dev-fixtures.
+          npx tsx src/cli.ts pipeline --input download --out ./out | tee pipeline-result.json
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const raw = fs.readFileSync('pipeline-result.json', 'utf8');
+          let j;
+          try { j = JSON.parse(raw); } catch (e) {
+            console.error('pipeline-result.json no es JSON válido');
+            process.exit(1);
+          }
+          if (!j || typeof j !== 'object' || Array.isArray(j)) {
+            console.error('pipeline: resultado no es objeto');
+            process.exit(1);
+          }
+          const outcome = j.outcome;
+          if (outcome !== 'published' && outcome !== 'synced_unchanged') {
+            console.error('Pipeline no publicable:', outcome, j.detail || '');
+            process.exit(1);
+          }
+          if (typeof j.needsDeploy !== 'boolean') {
+            console.error('pipeline: needsDeploy ausente o no booleano');
+            process.exit(1);
+          }
+          if (typeof j.datasetVersion !== 'string' || !/^[0-9a-f]{16}$/.test(j.datasetVersion)) {
+            console.error('pipeline: datasetVersion inválido');
+            process.exit(1);
+          }
+          if (typeof j.contentHash !== 'string' || !/^[0-9a-f]{64}$/.test(j.contentHash)) {
+            console.error('pipeline: contentHash inválido');
+            process.exit(1);
+          }
+          if (j.datasetVersion !== j.contentHash.slice(0, 16)) {
+            console.error('pipeline: datasetVersion no deriva de contentHash');
+            process.exit(1);
+          }
+          if (j.configMode && j.configMode !== 'production') {
+            console.error('pipeline: configMode debe ser production');
+            process.exit(1);
+          }
+          if (j.allowEmptyPublish === true) {
+            console.error('pipeline: allowEmptyPublish no permitido en Actions');
+            process.exit(1);
+          }
+
+          const live = path.join('out', 'live');
+          for (const name of ['current.json', 'manifest.json', 'sync.json']) {
+            const p = path.join(live, name);
+            if (!fs.existsSync(p)) {
+              console.error('Falta archivo local:', p);
+              process.exit(1);
+            }
+          }
+          const sync = JSON.parse(fs.readFileSync(path.join(live, 'sync.json'), 'utf8'));
+          const current = JSON.parse(fs.readFileSync(path.join(live, 'current.json'), 'utf8'));
+          const manifest = JSON.parse(fs.readFileSync(path.join(live, 'manifest.json'), 'utf8'));
+          if (sync.datasetVersion !== j.datasetVersion || current.datasetVersion !== j.datasetVersion) {
+            console.error('Incoherencia local datasetVersion');
+            process.exit(1);
+          }
+          if (sync.contentHash !== j.contentHash || current.contentHash !== j.contentHash) {
+            console.error('Incoherencia local contentHash');
+            process.exit(1);
+          }
+          if (typeof sync.lastSuccessfulFetchAt !== 'string' || !sync.lastSuccessfulFetchAt) {
+            console.error('sync.json local sin lastSuccessfulFetchAt');
+            process.exit(1);
+          }
+          const fetchAt = Date.parse(sync.lastSuccessfulFetchAt);
+          if (!Number.isFinite(fetchAt)) {
+            console.error('lastSuccessfulFetchAt no parseable');
+            process.exit(1);
+          }
+          const ageMs = Date.now() - fetchAt;
+          if (ageMs < -60_000 || ageMs > 30 * 60_000) {
+            console.error('lastSuccessfulFetchAt fuera de ventana de esta ejecución:', sync.lastSuccessfulFetchAt);
+            process.exit(1);
+          }
+          if (!Array.isArray(manifest.cells) || manifest.cells.length < 1) {
+            console.error('manifest local sin celdas');
+            process.exit(1);
+          }
+
+          const out = process.env.GITHUB_OUTPUT;
+          fs.appendFileSync(out, `outcome=${outcome}\n`);
+          fs.appendFileSync(out, `needs_deploy=${String(j.needsDeploy)}\n`);
+          fs.appendFileSync(out, `dataset_version=${j.datasetVersion}\n`);
+          fs.appendFileSync(out, `content_hash=${j.contentHash}\n`);
+          fs.appendFileSync(out, `last_successful_fetch_at=${sync.lastSuccessfulFetchAt}\n`);
+          console.log(`pipeline ok: outcome=${outcome} needsDeploy=${j.needsDeploy} version=${j.datasetVersion}`);
+          NODE
+
+      - name: Assert Worker name litromio-data
+        id: worker_name
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const text = fs.readFileSync('wrangler.jsonc', 'utf8');
+          // Quitar comentarios de línea y bloques (config local sin secretos).
+          const stripped = text
+            .replace(/\/\*[\s\S]*?\*\//g, '')
+            .replace(/^\s*\/\/.*$/gm, '');
+          const m = stripped.match(/"name"\s*:\s*"([^"]+)"/);
+          if (!m || m[1] !== 'litromio-data') {
+            console.error('Worker configurado no es litromio-data:', m && m[1]);
+            process.exit(1);
+          }
+          console.log('worker_name=litromio-data');
+          NODE
+
+      - name: Deploy Worker assets
+        id: deploy
+        if: >-
+          ${{
+            success()
+            && (steps.pipeline.outputs.outcome == 'published'
+                || steps.pipeline.outputs.outcome == 'synced_unchanged')
+            && steps.pipeline.outputs.needs_deploy == 'true'
+          }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo "Faltan secretos de Cloudflare para el despliegue."
+            exit 1
+          fi
+          # Publica únicamente el árbol recién generado (out/live vía wrangler.jsonc).
+          npx wrangler deploy --config wrangler.jsonc
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Verify published HTTP
+        id: verify
+        if: ${{ success() && steps.deploy.outputs.deployed == 'true' }}
+        env:
+          EXPECTED_VERSION: ${{ steps.pipeline.outputs.dataset_version }}
+          EXPECTED_HASH: ${{ steps.pipeline.outputs.content_hash }}
+          EXPECTED_FETCH_AT: ${{ steps.pipeline.outputs.last_successful_fetch_at }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const crypto = require('node:crypto');
+
+          const base = process.env.PUBLIC_DATA_BASE_URL.replace(/\/$/, '');
+          const expectedVersion = process.env.EXPECTED_VERSION;
+          const expectedHash = process.env.EXPECTED_HASH;
+          const expectedFetchAt = process.env.EXPECTED_FETCH_AT;
+          const live = path.join('out', 'live');
+
+          const localSync = JSON.parse(fs.readFileSync(path.join(live, 'sync.json'), 'utf8'));
+          const localCurrent = JSON.parse(fs.readFileSync(path.join(live, 'current.json'), 'utf8'));
+          const localManifest = JSON.parse(fs.readFileSync(path.join(live, 'manifest.json'), 'utf8'));
+          const cell = localManifest.cells[0];
+          if (!cell || typeof cell.path !== 'string' || typeof cell.sha256 !== 'string') {
+            console.error('Celda local inválida');
+            process.exit(1);
+          }
+          const retained = Array.isArray(localSync.retainedVersions) ? localSync.retainedVersions : [];
+
+          function sha256Hex(body) {
+            return crypto.createHash('sha256').update(body, 'utf8').digest('hex');
+          }
+
+          async function fetchOnce(url, { bust = false } = {}) {
+            const u = bust ? `${url}${url.includes('?') ? '&' : '?'}cb=${Date.now()}` : url;
+            const res = await fetch(u, {
+              headers: {
+                'Cache-Control': 'no-cache',
+                Pragma: 'no-cache',
+              },
+              redirect: 'follow',
+            });
+            const text = await res.text();
+            return { res, text, headers: res.headers };
+          }
+
+          function headerOf(headers, name) {
+            return headers.get(name) || headers.get(name.toLowerCase()) || '';
+          }
+
+          function assertCors(headers, label) {
+            const acao = headerOf(headers, 'access-control-allow-origin');
+            if (acao.trim() !== '*') {
+              throw new Error(`${label}: CORS Access-Control-Allow-Origin esperado "*", got "${acao}"`);
+            }
+          }
+
+          function assertCache(headers, label, expected) {
+            const cc = headerOf(headers, 'cache-control').toLowerCase().replace(/\s+/g, '');
+            const exp = expected.toLowerCase().replace(/\s+/g, '');
+            // Aceptar el valor exacto o un superconjunto que lo contenga en el mismo orden de tokens clave.
+            if (!cc.includes('public') || !cc.includes(exp.includes('immutable') ? 'immutable' : 'must-revalidate')) {
+              throw new Error(`${label}: Cache-Control inesperado "${headerOf(headers, 'cache-control')}" (esperado ~ ${expected})`);
+            }
+            if (exp.includes('max-age=60') && !cc.includes('max-age=60')) {
+              throw new Error(`${label}: falta max-age=60`);
+            }
+            if (exp.includes('max-age=31536000') && !cc.includes('max-age=31536000')) {
+              throw new Error(`${label}: falta max-age=31536000`);
+            }
+          }
+
+          async function sleep(ms) {
+            await new Promise((r) => setTimeout(r, ms));
+          }
+
+          const maxAttempts = 12;
+          const delayMs = 10_000;
+          let lastErr = null;
+
+          for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+              console.log(`verify attempt ${attempt}/${maxAttempts}`);
+
+              const current = await fetchOnce(`${base}/current.json`, { bust: true });
+              if (!current.res.ok) throw new Error(`current.json HTTP ${current.res.status}`);
+              assertCors(current.headers, 'current.json');
+              assertCache(current.headers, 'current.json', 'public, max-age=60, must-revalidate');
+              const currentJson = JSON.parse(current.text);
+              if (currentJson.datasetVersion !== expectedVersion) {
+                throw new Error(`current.datasetVersion=${currentJson.datasetVersion} != ${expectedVersion}`);
+              }
+              if (currentJson.contentHash !== expectedHash) {
+                throw new Error('current.contentHash no coincide');
+              }
+              if (currentJson.lastSuccessfulFetchAt !== expectedFetchAt) {
+                throw new Error(`current.lastSuccessfulFetchAt=${currentJson.lastSuccessfulFetchAt} != ${expectedFetchAt}`);
+              }
+
+              const sync = await fetchOnce(`${base}/sync.json`, { bust: true });
+              if (!sync.res.ok) throw new Error(`sync.json HTTP ${sync.res.status}`);
+              assertCors(sync.headers, 'sync.json');
+              assertCache(sync.headers, 'sync.json', 'public, max-age=60, must-revalidate');
+              const syncJson = JSON.parse(sync.text);
+              if (syncJson.datasetVersion !== expectedVersion || syncJson.contentHash !== expectedHash) {
+                throw new Error('sync.json no coherente con resultado local');
+              }
+              if (syncJson.lastSuccessfulFetchAt !== expectedFetchAt) {
+                throw new Error(`sync.lastSuccessfulFetchAt=${syncJson.lastSuccessfulFetchAt} != ${expectedFetchAt}`);
+              }
+              if (syncJson.lastSuccessfulFetchAt !== localSync.lastSuccessfulFetchAt) {
+                throw new Error('sync remoto != sync local (lastSuccessfulFetchAt)');
+              }
+
+              const rootManifest = await fetchOnce(`${base}/manifest.json`, { bust: true });
+              if (!rootManifest.res.ok) throw new Error(`manifest.json HTTP ${rootManifest.res.status}`);
+              assertCors(rootManifest.headers, 'manifest.json');
+              assertCache(rootManifest.headers, 'manifest.json', 'public, max-age=60, must-revalidate');
+              const rootManifestJson = JSON.parse(rootManifest.text);
+              if (rootManifestJson.datasetVersion !== expectedVersion || rootManifestJson.contentHash !== expectedHash) {
+                throw new Error('manifest.json raíz no coherente');
+              }
+              if (rootManifestJson.lastSuccessfulFetchAt && rootManifestJson.lastSuccessfulFetchAt !== expectedFetchAt) {
+                throw new Error('manifest.root lastSuccessfulFetchAt distinto');
+              }
+
+              const versionedUrl = `${base}/v/${expectedVersion}/manifest.json`;
+              const versioned = await fetchOnce(versionedUrl);
+              if (!versioned.res.ok) throw new Error(`manifest versionado HTTP ${versioned.res.status}`);
+              assertCors(versioned.headers, 'manifest versionado');
+              assertCache(versioned.headers, 'manifest versionado', 'public, max-age=31536000, immutable');
+              const versionedJson = JSON.parse(versioned.text);
+              if (versionedJson.datasetVersion !== expectedVersion || versionedJson.contentHash !== expectedHash) {
+                throw new Error('manifest versionado no coherente');
+              }
+
+              const cellUrl = `${base}/${cell.path.replace(/^\//, '')}`;
+              const cellRes = await fetchOnce(cellUrl);
+              if (!cellRes.res.ok) throw new Error(`celda HTTP ${cellRes.res.status} ${cell.path}`);
+              assertCors(cellRes.headers, 'celda');
+              assertCache(cellRes.headers, 'celda', 'public, max-age=31536000, immutable');
+              const cellSha = sha256Hex(cellRes.text.endsWith('\n') ? cellRes.text : `${cellRes.text}\n`);
+              const cellShaRaw = sha256Hex(cellRes.text);
+              if (cellSha !== cell.sha256 && cellShaRaw !== cell.sha256) {
+                throw new Error(`hash celda ${cell.id}: remoto no coincide con manifiesto (${cell.sha256})`);
+              }
+
+              if (retained.length > 0) {
+                const prev = retained[0];
+                if (typeof prev !== 'string' || !/^[0-9a-f]{16}$/.test(prev)) {
+                  throw new Error(`retainedVersions[0] inválido: ${prev}`);
+                }
+                if (prev !== expectedVersion) {
+                  const prevRes = await fetchOnce(`${base}/v/${prev}/manifest.json`);
+                  if (!prevRes.res.ok) {
+                    throw new Error(`versión anterior ${prev} no accesible: HTTP ${prevRes.status}`);
+                  }
+                  assertCors(prevRes.headers, 'manifest anterior');
+                  assertCache(prevRes.headers, 'manifest anterior', 'public, max-age=31536000, immutable');
+                  const prevJson = JSON.parse(prevRes.text);
+                  if (prevJson.datasetVersion !== prev) {
+                    throw new Error('manifest anterior datasetVersion distinto');
+                  }
+                }
+              }
+
+              // Coherencia con current/local pointers
+              if (localCurrent.datasetVersion !== currentJson.datasetVersion) {
+                throw new Error('current local/remoto divergente');
+              }
+
+              console.log('verify ok');
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, 'verified=true\n');
+              process.exit(0);
+            } catch (err) {
+              lastErr = err;
+              console.error(`verify attempt ${attempt} failed:`, err && err.message ? err.message : err);
+              if (attempt < maxAttempts) await sleep(delayMs);
+            }
+          }
+
+          console.error('Verificación HTTP fallida tras reintentos:', lastErr && lastErr.message ? lastErr.message : lastErr);
+          process.exit(1);
+          NODE
+
+      - name: Require deploy+verify when deploy expected
+        if: ${{ success() && steps.pipeline.outputs.needs_deploy == 'true' }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.deploy.outputs.deployed }}" != "true" ]; then
+            echo "Se esperaba despliegue (needsDeploy=true) pero no ocurrió."
+            exit 1
+          fi
+          if [ "${{ steps.verify.outputs.verified }}" != "true" ]; then
+            echo "Se esperaba verificación HTTP OK tras el despliegue."
+            exit 1
+          fi
+
+      - name: Summary
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## litromio-data — resultado"
+            echo ""
+            echo "### Generación"
+            echo "- recover: \`${{ steps.recover.outcome }}\`"
+            echo "- pipeline outcome: \`${{ steps.pipeline.outputs.outcome || 'n/a' }}\`"
+            echo "- needsDeploy: \`${{ steps.pipeline.outputs.needs_deploy || 'n/a' }}\`"
+            echo "- datasetVersion: \`${{ steps.pipeline.outputs.dataset_version || 'n/a' }}\`"
+            echo "- lastSuccessfulFetchAt: \`${{ steps.pipeline.outputs.last_successful_fetch_at || 'n/a' }}\`"
+            echo ""
+            echo "### Despliegue"
+            echo "- worker: \`litromio-data\` (único permitido)"
+            echo "- deploy step: \`${{ steps.deploy.outcome }}\`"
+            echo "- deployed: \`${{ steps.deploy.outputs.deployed || 'false' }}\`"
+            echo ""
+            echo "### Verificación"
+            echo "- verify step: \`${{ steps.verify.outcome }}\`"
+            echo "- verified: \`${{ steps.verify.outputs.verified || 'false' }}\`"
+            echo ""
+            echo "### Controles"
+            echo "- triggers: solo \`workflow_dispatch\` (schedule desactivado)"
+            echo "- bootstrap / allow-empty-publish: deshabilitado"
+            echo "- secrets: no se imprimen"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
