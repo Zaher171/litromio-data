@@ -1,6 +1,6 @@
-# Seguridad de GitHub Actions (diseño — no activado)
+# Seguridad de GitHub Actions
 
-Este archivo describe el diseño. El workflow de ejemplo está en `examples/workflows/update-data.yml` (**no** en `.github/workflows`) para que Actions no se active hasta copiarlo y autorizarlo explícitamente.
+Workflow activo en `.github/workflows/update-data.yml`. Ejemplo histórico en `examples/workflows/update-data.yml`.
 
 ## Principios
 
@@ -11,13 +11,15 @@ Este archivo describe el diseño. El workflow de ejemplo está en `examples/work
 | Acciones de terceros | Fijadas a **SHA de commit** verificados (no tags flotantes solos) |
 | PRs externos | Sin ejecución privilegiada; **no** `pull_request_target` |
 | Secretos | Futuros: `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` — **no solicitados ni añadidos en 1C.1** |
-| Arranque | Primero `workflow_dispatch` manual; `schedule` después de revisión |
+| Arranque | `workflow_dispatch` manual + `schedule` (`17,47 * * * *` UTC, ~cada 30 min) |
 | Primer publish | Input `allow_empty_publish=true` solo una vez; no usar si falló recover |
 | Estado previo | `PUBLIC_DATA_BASE_URL` (variable de repo) + `cli recover` antes de generar |
-| Cron | Fuera del minuto `:00` (p. ej. `17,47 * * * *`); documentar retrasos/omisiones posibles |
+| Cron | `17,47 * * * *` — minutos 17 y 47 de cada hora UTC (~cada 30 min); fuera de `:00` |
+| Retrasos | GitHub puede retrasar u omitir ejecuciones programadas; **no** es tiempo real garantizado |
 | Inactividad | Repo público: schedule puede desactivarse a los 60 días sin actividad; **sin** commits dummy |
+| Datos antiguos | La app Litromio debe avisar si `lastSuccessfulFetchAt` supera el umbral (`docs/CONSISTENCY.md`) |
 | Artefactos | No usar como CDN ni como única fuente de verdad entre runners |
-| Deploy | Paso remoto **desactivado** (`if: false`) hasta autorización |
+| Deploy | Condicionado a `needsDeploy`; verificación HTTP post-deploy |
 
 ## SHAs fijados en el ejemplo (verificados 2026-08-27)
 

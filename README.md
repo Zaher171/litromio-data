@@ -8,7 +8,10 @@ No contiene la aplicación Litromio, su historial Git, secretos ni configuració
 
 - Preparado y probado **en local** (Fase 1C.1: recover, sync de frescura, umbral de producción fijo).
 - Repositorio público de código del pipeline; la salida generada (`out/`) **no** se versiona en Git.
-- **Sin** schedule ni credenciales activadas en este repositorio.
+- Workflow Actions activo: `workflow_dispatch` + **schedule** cada ~30 min (`17,47 * * * *` UTC).
+- GitHub puede retrasar u omitir ejecuciones programadas; no es tiempo real garantizado.
+- El cron puede desactivarse en repos públicos tras ~60 días de inactividad.
+- La aplicación Litromio debe avisar si la última sincronización válida es antigua (`docs/CONSISTENCY.md`).
 - Licencia del **código** de este paquete: **pendiente de decisión del usuario** (ver `LICENSE-CODE.PENDING.md`).
 - Condiciones de los **datos**: reutilización del sector público (ver `docs/SOURCE.md` y `docs/ATTRIBUTION.md`).
 
@@ -45,5 +48,5 @@ npm run measure -- --input .\fixtures\estaciones-terrestres.json --out .\out --a
 | `docs/RUN.md` | Ejecución local |
 | `docs/PUBLISH.md` | Publicación prevista (Worker Static Assets) |
 | `docs/CONSISTENCY.md` | Versiones, sync, CORS, fallos, clientes |
-| `docs/SECURITY-ACTIONS.md` | Diseño Actions (no activado) |
+| `docs/SECURITY-ACTIONS.md` | Seguridad del workflow Actions activo |
 | `examples/workflows/update-data.yml` | Ejemplo de workflow (**fuera** de `.github/workflows`) |

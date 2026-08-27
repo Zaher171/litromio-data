@@ -1,5 +1,12 @@
-# Actualización manual de litromio-data (CDN ya publicado).
-# Solo workflow_dispatch — schedule desactivado hasta autorización explícita.
+# Actualización programada y manual de litromio-data (CDN ya publicado).
+# Triggers: workflow_dispatch + schedule cada ~30 min (minutos 17 y 47 UTC).
+#
+# Programación (GitHub Actions schedule):
+# - Cron '17,47 * * * *' → dos veces por hora, en :17 y :47 UTC.
+# - GitHub puede retrasar u omitir ejecuciones; no es tiempo real garantizado.
+# - En repos públicos, el schedule puede desactivarse tras ~60 días de inactividad.
+# - La aplicación Litromio debe avisar si la última sincronización válida es antigua
+#   (ver docs/CONSISTENCY.md — staleAfterMinutes / lastSuccessfulFetchAt).
 #
 # SHAs verificados (2026-08-27) vía API de GitHub:
 # - actions/checkout@v4.2.2 → 11bd71901bbe5b1630ceea73d27597364c9af683
@@ -9,9 +16,8 @@ name: update-litromio-data
 
 on:
   workflow_dispatch:
-  # schedule desactivado (no habilitar sin autorización):
-  # schedule:
-  #   - cron: '17,47 * * * *'
+  schedule:
+    - cron: '17,47 * * * *'
 
 permissions:
   contents: read
@@ -286,7 +292,9 @@ jobs:
             echo "- verified: \`${{ steps.verify.outputs.verified || 'false' }}\`"
             echo ""
             echo "### Controles"
-            echo "- triggers: solo \`workflow_dispatch\` (schedule desactivado)"
+            echo "- triggers: \`workflow_dispatch\` + \`schedule\` (\`17,47 * * * *\` UTC, ~cada 30 min)"
+            echo "- schedule: GitHub puede retrasar/omitir; repos públicos inactivos pueden perder el cron"
+            echo "- aviso app: datos antiguos si \`lastSuccessfulFetchAt\` supera umbral (CONSISTENCY.md)"
             echo "- bootstrap / allow-empty-publish: deshabilitado"
             echo "- secrets: no se imprimen"
           } | tee -a "$GITHUB_STEP_SUMMARY"
