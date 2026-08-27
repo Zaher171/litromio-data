@@ -3,9 +3,11 @@
 ## Inmutabilidad y versiones
 
 - Cada conjunto lleva `datasetVersion` = 16 hex del `contentHash` (SHA-256 del contenido normalizado, **sin** fechas de reloj).
-- Rutas versionadas **inmutables**: `v/{datasetVersion}/cells/...` y `v/{datasetVersion}/manifest.json`.
-- Punteros **mutables** con caché corta: `manifest.json`, `current.json`, `sync.json`.
+- Rutas versionadas **inmutables**: `v/{datasetVersion}/cells/...`, `v/{datasetVersion}/manifest.json` y, si existe, `v/{datasetVersion}/municipality-cells.json`.
+- Geometrías municipales (ciclo aparte): `g/{geometryVersion}/…` inmutable; `g/current.json` mutable. Ver `docs/FASE-4D-MUNICIPAL.md`.
+- Punteros **mutables** con caché corta: `manifest.json`, `current.json`, `sync.json` (y `g/current.json` si hay geometría).
 - **No** cambiar bytes bajo una URL ya publicada como inmutable.
+- **No** regenerar packs geométricos en el sync de precios (~30 min).
 
 ## Relojes de sync (no confundir)
 
@@ -55,6 +57,26 @@ La app privada (otro origen) debe poder hacer `GET` de esos JSON gracias a CORS 
 2. Si la retención (`retainPreviousVersions: 1`) ya omitió esa versión en un deploy posterior, esas URLs responden **404**.
 3. Reacción correcta: volver a leer `current.json` / `sync.json`, adoptar el `datasetVersion` activo y descargar solo las celdas nuevas.
 4. No reutilizar celdas de un manifiesto viejo mezcladas con el puntero nuevo.
+
+### Lectura de punteros durante un despliegue (no mezclar versiones)
+
+El deploy remoto de Static Assets es **atómico por versión de Worker**: un cliente no debería ver a la vez celdas de N y manifiesto de N+1 en el mismo árbol desplegado.
+
+Aun así, con caché corta en punteros (`max-age=60`) o lecturas secuenciales, el cliente puede observar un **corte entre punteros** (p. ej. `current.json` nuevo y `g/current.json` aún cacheado, o `datasetVersion` distinto entre `current` y `sync`).
+
+**Detección:**
+
+1. Tras leer `current.json`, anotar `datasetVersion`, `contentHash`, `manifestPath` y, si existen, `municipalityCellsPath` / `geometryCurrentPath` / `geometryCatalogPath`.
+2. Leer `sync.json` y `g/current.json` (si se usa geometría) y comprobar que identifican el **mismo** conjunto (`datasetVersion`/`contentHash` de precios; `geometryCatalogPath` === `g/current.manifestPath`).
+3. Al descargar manifiesto versionado, índice municipal o packs: verificar rutas canónicas y hashes declarados.
+4. Señales de mezcla: 404 en ruta referenciada, hash distinto, `geometryCatalogPath` ≠ manifiesto geométrico activo, o `municipality-cells` con otro `datasetVersion`/`contentHash`.
+
+**Reintento:**
+
+1. Descartar el snapshot parcial.
+2. Releer `current.json` (y `sync.json` / `g/current.json`) con cache-bust o sin asumir caché fresca.
+3. Repetir el árbol completo desde ese snapshot; no mezclar archivos de intentos anteriores.
+4. Tras varios fallos coherentes → tratar como datos no disponibles / stale (no inventar precios).
 
 ## Frescura sin cambio de precios
 
@@ -121,6 +143,8 @@ Primer despliegue solo con `--allow-empty-publish` / `allow_empty_publish=true` 
 
 ## Retención y limpieza
 
-- Conservar versión activa + 1 anterior en el árbol de assets.
+- `retainPreviousVersions` / `retainGeometryVersions` **default 1** = conservar **una versión anterior además de la activa** (total 2 por ciclo: activa + 1 retenida). No significa “solo 1 versión en total”.
+- Listas `retainedVersions` en `sync.json` / `g/current.json` **no** incluyen la activa.
+- Ningún archivo aún referenciado por la activa o por una retenida debe desaparecer del árbol publicado.
 - No acumular snapshots en Git.
-- Limpieza = omitir versiones más viejas en el siguiente deploy exitoso de contenido.
+- Limpieza = omitir versiones más viejas en el siguiente deploy exitoso de contenido (precios) o de geometría (ciclo A).

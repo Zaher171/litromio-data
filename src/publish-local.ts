@@ -1,7 +1,15 @@
-import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  applyMunicipalPointersToCurrent,
+  assertGeometryTreeCoherent,
+  assertMunicipalityCellsFileCoherent,
+  preserveGeometryTreeFromLive,
+  readGeometryCurrent,
+} from './geometry.ts';
+import { sha256Hex } from './hash.ts';
+import { municipalityCellsRelPath } from './municipality-cells.ts';
 import type { Manifest } from './types.ts';
 import {
   buildSyncState,
@@ -136,10 +144,11 @@ export interface PromoteOptions {
  * Publicación local del árbol staging → live.
  *
  * Pasos:
- * 1) staging completo + retención de versión anterior
- * 2) metadatos mutables (publishedAt, sync.json, _headers)
- * 3) validación de TODO el árbol staging
- * 4) reemplazo de live (copia + restauración en Windows; NO es atómico para lectores concurrentes)
+ * 1) staging completo + retención de versión anterior de precios
+ * 2) conservación de g/ (geometrías) desde live — sin regenerar
+ * 3) metadatos mutables (publishedAt, sync.json, _headers, punteros municipales)
+ * 4) validación de TODO el árbol staging
+ * 5) reemplazo de live (copia + restauración en Windows; NO es atómico para lectores concurrentes)
  *
  * Ante fallo de validación o de copia: conserva live previo si existía.
  */
@@ -150,7 +159,7 @@ export function promoteStagingToLive(
 ): { ok: true; metrics: { totalBytes: number; maxFileBytes: number; fileCount: number } } | { ok: false; reason: string } {
   const written = writeStaging(store.stagingDir, files);
 
-  // Retener versión anterior: copiar v/{old}/ desde live si existe y no está en staging.
+  // Retener versión anterior de precios: copiar v/{old}/ desde live si existe y no está en staging.
   if (options.retainPreviousVersions > 0 && fs.existsSync(store.liveDir)) {
     const prevManifest = readLiveManifest(store.liveDir);
     if (prevManifest) {
@@ -160,6 +169,11 @@ export function promoteStagingToLive(
         copyDir(prevDir, destPrev);
       }
     }
+  }
+
+  // Conservar geometrías municipales entre syncs de precios (ciclo A independiente).
+  if (fs.existsSync(store.liveDir)) {
+    preserveGeometryTreeFromLive(store.liveDir, store.stagingDir);
   }
 
   // Actualizar publishedAt / lastSuccessfulFetchAt en punteros del staging.
@@ -200,6 +214,10 @@ export function promoteStagingToLive(
         retainedVersions: retained,
       }),
     );
+    applyMunicipalPointersToCurrent(store.stagingDir, {
+      datasetVersion: activeManifest.datasetVersion,
+      geometry: readGeometryCurrent(store.stagingDir),
+    });
   }
 
   try {
@@ -250,13 +268,11 @@ export function promoteStagingToLive(
   return { ok: true, metrics: written };
 }
 
-export function sha256Hex(body: string | Buffer): string {
-  return createHash('sha256').update(body).digest('hex');
-}
+export { sha256Hex } from './hash.ts';
 
 export function sha256File(filePath: string): string {
   const body = fs.readFileSync(filePath);
-  return createHash('sha256').update(body).digest('hex');
+  return sha256Hex(body);
 }
 
 /** Verifica coherencia manifiesto activo ↔ archivos de celdas. */
@@ -293,7 +309,7 @@ export function assertManifestCoherent(rootDir: string): { ok: true } | { ok: fa
 
 /**
  * Valida el árbol completo a publicar: punteros, sync, versión activa,
- * versiones retenidas y cabeceras.
+ * versiones retenidas, cabeceras y assets municipales si están declarados.
  */
 export function assertPublishedTreeCoherent(rootDir: string): { ok: true } | { ok: false; reason: string } {
   const active = assertManifestCoherent(rootDir);
@@ -345,6 +361,41 @@ export function assertPublishedTreeCoherent(rootDir: string): { ok: true } | { o
           return { ok: false, reason: `Hash distinto en celda retenida ${cell.path}` };
         }
       }
+    }
+  }
+
+  // municipality-cells: si current lo declara, debe existir y ligarse al dataset activo.
+  if (typeof current.municipalityCellsPath === 'string') {
+    const expected = municipalityCellsRelPath(manifest.datasetVersion);
+    if (current.municipalityCellsPath !== expected) {
+      return { ok: false, reason: 'municipalityCellsPath no canónico para dataset activo' };
+    }
+    const cellsAbs = path.join(rootDir, expected);
+    if (!fs.existsSync(cellsAbs)) {
+      return { ok: false, reason: 'municipalityCellsPath declarado pero archivo ausente' };
+    }
+    const cellsCheck = assertMunicipalityCellsFileCoherent(rootDir, manifest);
+    if (!cellsCheck.ok) return cellsCheck;
+  } else {
+    // Si el archivo existe sin declaración, aún debe ser coherente.
+    const cellsCheck = assertMunicipalityCellsFileCoherent(rootDir, manifest);
+    if (!cellsCheck.ok) return cellsCheck;
+  }
+
+  const geometryDeclared =
+    typeof current.geometryCurrentPath === 'string' || typeof current.geometryCatalogPath === 'string';
+  const geo = assertGeometryTreeCoherent(rootDir, { requirePresent: geometryDeclared });
+  if (!geo.ok) return geo;
+
+  if (geometryDeclared) {
+    if (current.geometryCurrentPath !== 'g/current.json') {
+      return { ok: false, reason: 'geometryCurrentPath no canónico' };
+    }
+    if (!geo.current) {
+      return { ok: false, reason: 'Geometría declarada en current.json pero g/ ausente' };
+    }
+    if (current.geometryCatalogPath !== geo.current.manifestPath) {
+      return { ok: false, reason: 'geometryCatalogPath no coincide con g/current.json' };
     }
   }
 

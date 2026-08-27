@@ -42,6 +42,25 @@ export {
   type SyncState,
 } from './sync-state.ts';
 export {
+  buildMunicipalityCellsDocument,
+  municipalityCellsRelPath,
+  parseMunicipalityCellsDocument,
+  validateMunicipalityCellsCoverage,
+  cellIdsForMunicipalityIds,
+  serializeMunicipalityCellsDocument,
+} from './municipality-cells.ts';
+export {
+  buildGeometryPublishFiles,
+  incorporateGeometryIntoLive,
+  preserveGeometryTreeFromLive,
+  assertGeometryTreeCoherent,
+  readGeometryCurrent,
+  GEOMETRY_CURRENT_REL,
+  verifyGeometryIndependentOfPrices,
+  parseGeometryCurrent,
+  parseMunicipalityCatalog,
+} from './geometry.ts';
+export {
   ATTRIBUTION,
   DEFAULT_GRID,
   DEFAULT_PIPELINE_CONFIG,

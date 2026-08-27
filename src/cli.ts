@@ -1,8 +1,16 @@
+/**
+ * CLI: descarga, pipeline de precios e incorporación explícita de geometría municipal.
+ */
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { downloadFuente, readLocalPayload, withRetries } from './download.ts';
+import {
+  buildGeometryPublishFiles,
+  incorporateGeometryIntoLive,
+} from './geometry.ts';
 import { runPipeline } from './pipeline.ts';
+import { createStorePaths } from './publish-local.ts';
 import { recoverPublishedState } from './recover-state.ts';
 import {
   DEFAULT_PIPELINE_CONFIG,
@@ -18,11 +26,13 @@ function usage(): never {
   npx tsx src/cli.ts generate --input <json> --out <dir> [--dev-fixtures] [--allow-empty-publish]
   npx tsx src/cli.ts pipeline --input <json|--download> --out <dir> [--public-base-url <url>] [--allow-empty-publish] [--dev-fixtures]
   npx tsx src/cli.ts measure --input <json|--download> --out <dir> [--metrics <path>] [--dev-fixtures] [--allow-empty-publish]
-  npx tsx src/cli.ts recover --public-base-url <url> --out <dir>
+  npx tsx src/cli.ts recover --public-base-url <url> --out <dir> [--allow-http-local]
+  npx tsx src/cli.ts geometry-publish --out <dir> --packs-dir <dir> --source-manifest <json> --relations <json> --geometry-version <16hex> --catalog-version <16hex> [--allow-initial-geometry]
 
 Producción: umbral nacional fijo (minStationCountAbsolute=${DEFAULT_PIPELINE_CONFIG.minStationCountAbsolute}).
 --dev-fixtures: solo pruebas/desarrollo local (incompatible con producción).
---allow-empty-publish: primer arranque explícito sin estado previo.
+--allow-empty-publish: primer arranque explícito sin estado previo de precios.
+--allow-initial-geometry: primera incorporación explícita de g/ (nunca ante fallo de recover).
 --public-base-url: recupera estado publicado antes de generar (obligatorio en runners limpios salvo bootstrap).
 `);
   process.exit(2);
@@ -102,7 +112,11 @@ async function main(): Promise<void> {
   if (cmd === 'recover') {
     const publicBaseUrl = argValue(args, '--public-base-url');
     if (!publicBaseUrl) usage();
-    const recovered = await recoverPublishedState({ publicBaseUrl, outRoot: outDir });
+    const recovered = await recoverPublishedState({
+      publicBaseUrl,
+      outRoot: outDir,
+      allowHttpLocal: hasFlag(args, '--allow-http-local'),
+    });
     if (!recovered.ok) {
       console.log(
         JSON.stringify(
@@ -126,6 +140,105 @@ async function main(): Promise<void> {
           contentHash: recovered.manifest.contentHash,
           fileCount: recovered.fileCount,
           needsDeploy: false,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+
+  if (cmd === 'geometry-publish') {
+    const packsDir = argValue(args, '--packs-dir');
+    const sourceManifestPath = argValue(args, '--source-manifest');
+    const relationsPath = argValue(args, '--relations');
+    const geometryVersion = argValue(args, '--geometry-version');
+    const catalogVersion = argValue(args, '--catalog-version');
+    if (!packsDir || !sourceManifestPath || !relationsPath || !geometryVersion || !catalogVersion) {
+      usage();
+    }
+    const store = createStorePaths(outDir);
+    const sourceManifest = JSON.parse(fs.readFileSync(path.resolve(sourceManifestPath), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    const relationsRaw = JSON.parse(fs.readFileSync(path.resolve(relationsPath), 'utf8')) as {
+      relations: Record<string, string[]>;
+      ineWithoutMinetur: string[];
+      stats?: { ineCount?: number };
+      generatedAt?: string;
+    };
+    const publishedAt = new Date().toISOString();
+    const built = buildGeometryPublishFiles({
+      geometryVersion,
+      catalogVersion,
+      packsDir: path.resolve(packsDir),
+      sourceManifest,
+      relations: {
+        relations: relationsRaw.relations,
+        ineWithoutMinetur: relationsRaw.ineWithoutMinetur,
+        ...(relationsRaw.stats?.ineCount !== undefined ? { ineCount: relationsRaw.stats.ineCount } : {}),
+        ...(relationsRaw.generatedAt !== undefined ? { generatedAt: relationsRaw.generatedAt } : {}),
+      },
+      publishedAt,
+      previousGeometryVersion: null,
+      retainGeometryVersions: DEFAULT_PIPELINE_CONFIG.retainGeometryVersions,
+    });
+    if (!built.ok) {
+      console.log(JSON.stringify({ outcome: 'failed_geometry_build', detail: built.reason }, null, 2));
+      process.exit(1);
+    }
+    // Si ya hay g/, retener versión previa.
+    const existingG = path.join(store.liveDir, 'g', 'current.json');
+    let previous: string | null = null;
+    if (fs.existsSync(existingG)) {
+      const prev = JSON.parse(fs.readFileSync(existingG, 'utf8')) as { geometryVersion?: string };
+      previous = typeof prev.geometryVersion === 'string' ? prev.geometryVersion : null;
+    }
+    const rebuilt =
+      previous && previous !== geometryVersion
+        ? buildGeometryPublishFiles({
+            geometryVersion,
+            catalogVersion,
+            packsDir: path.resolve(packsDir),
+            sourceManifest,
+            relations: {
+              relations: relationsRaw.relations,
+              ineWithoutMinetur: relationsRaw.ineWithoutMinetur,
+              ...(relationsRaw.stats?.ineCount !== undefined ? { ineCount: relationsRaw.stats.ineCount } : {}),
+              ...(relationsRaw.generatedAt !== undefined ? { generatedAt: relationsRaw.generatedAt } : {}),
+            },
+            publishedAt,
+            previousGeometryVersion: previous,
+            retainGeometryVersions: DEFAULT_PIPELINE_CONFIG.retainGeometryVersions,
+          })
+        : built;
+    if (!rebuilt.ok) {
+      console.log(JSON.stringify({ outcome: 'failed_geometry_build', detail: rebuilt.reason }, null, 2));
+      process.exit(1);
+    }
+    const incorporated = incorporateGeometryIntoLive({
+      liveDir: store.liveDir,
+      geometryFiles: rebuilt.files,
+      geometryCurrent: rebuilt.current,
+      retainGeometryVersions: DEFAULT_PIPELINE_CONFIG.retainGeometryVersions,
+      allowInitialGeometry: hasFlag(args, '--allow-initial-geometry'),
+    });
+    if (!incorporated.ok) {
+      console.log(
+        JSON.stringify({ outcome: 'failed_geometry_publish', detail: incorporated.reason, needsDeploy: false }, null, 2),
+      );
+      process.exit(1);
+    }
+    console.log(
+      JSON.stringify(
+        {
+          outcome: 'geometry_published',
+          geometryVersion,
+          catalogVersion,
+          needsDeploy: true,
+          metrics: incorporated.metrics,
+          note: 'Incorporación local de g/. No es deploy remoto ni Actions.',
         },
         null,
         2,

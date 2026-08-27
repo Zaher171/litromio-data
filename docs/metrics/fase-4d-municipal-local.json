@@ -1,0 +1,38 @@
+{
+  "measuredAt": "2026-08-27T18:11:19.251Z",
+  "kind": "local_http_measure",
+  "note": "Mediciones locales (preparación + recover vía HTTP 127.0.0.1). NO son tiempos de GitHub Actions ni wrangler/Cloudflare.",
+  "pendingRemote": [
+    "actions_wall_time",
+    "wrangler_deploy_bytes",
+    "cloudflare_upload_dedup"
+  ],
+  "geometryVersion": "48486177e5e97d93",
+  "catalogVersion": "d4cb8bc28ee4c9e4",
+  "timingsMs": {
+    "copyPricesLive": 168,
+    "geometryPublishPrepare": 2440,
+    "recoverHttpLocal": 2597
+  },
+  "treeAfterPrepare": {
+    "files": 588,
+    "bytes": 57283168
+  },
+  "geometrySubtree": {
+    "files": 308,
+    "bytes": 52388661
+  },
+  "recover": {
+    "ok": true,
+    "fileCount": 588,
+    "tree": {
+      "files": 588,
+      "bytes": 57283461
+    },
+    "detail": {
+      "datasetVersion": "28e6778e44556f66",
+      "contentHash": "28e6778e44556f66527c71ae141b6a85e2acacea7fb6605acd72cc317933ede1"
+    }
+  },
+  "concurrencyNote": "Recover de packs: concurrencia 8, maxResponseBytes 25 MiB (límite Free/archivo), timeouts ampliados; validaciones de hash/esquema/ruta intactas. timingsMs.recoverHttpLocal es HTTP local (127.0.0.1), NO wall-time de Actions ni CDN Cloudflare. Servidor HTTP y recover en el mismo event loop."
+}

@@ -1,5 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import {
+  applyMunicipalPointersToCurrent,
+  assertGeometryTreeCoherent,
+  readGeometryCurrent,
+} from './geometry.ts';
 import type { Manifest } from './types.ts';
 import { parseFuenteFechaToEpoch } from './validate.ts';
 
@@ -169,15 +174,32 @@ export function updateMutableFreshness(
 
   // Snapshot de archivos versionados para detectar mutación accidental.
   const versionedSnapshot = snapshotImmutableTree(versionedDir);
+  const geometryDir = path.join(liveDir, 'g');
+  const geometrySnapshot = fs.existsSync(geometryDir) ? snapshotImmutableTree(geometryDir) : null;
 
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`, 'utf8');
   fs.writeFileSync(currentPath, `${JSON.stringify(current)}\n`, 'utf8');
   writeSyncState(liveDir, sync);
 
+  // Reaplicar punteros municipales opcionales (conserva g/ y municipality-cells).
+  applyMunicipalPointersToCurrent(liveDir, {
+    datasetVersion: manifest.datasetVersion,
+    geometry: readGeometryCurrent(liveDir),
+  });
+
   const after = snapshotImmutableTree(versionedDir);
   if (after !== versionedSnapshot) {
     return { ok: false, reason: 'Se mutó un archivo bajo URL inmutable durante freshness' };
   }
+  if (geometrySnapshot !== null) {
+    const afterGeo = snapshotImmutableTree(geometryDir);
+    if (afterGeo !== geometrySnapshot) {
+      return { ok: false, reason: 'Se mutó el árbol g/ durante freshness (geometrías son independientes)' };
+    }
+  }
+
+  const geoCheck = assertGeometryTreeCoherent(liveDir);
+  if (!geoCheck.ok) return geoCheck;
 
   return { ok: true, sync };
 }

@@ -2,11 +2,26 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import {
+  assertGeometryTreeCoherent,
+  GEOMETRY_CURRENT_REL,
+  geometryCatalogRel,
+  geometryManifestRel,
+  parseGeometryCatalogManifest,
+  parseGeometryCurrent,
+  parseMunicipalityCatalog,
+  type GeometryCatalogManifest,
+  type GeometryCurrent,
+} from './geometry.ts';
+import {
+  municipalityCellsRelPath,
+  parseMunicipalityCellsDocument,
+} from './municipality-cells.ts';
+import {
   assertPublishedTreeCoherent,
   copyStaticHeadersInto,
   createStorePaths,
-  sha256Hex,
 } from './publish-local.ts';
+import { sha256Hex } from './hash.ts';
 import type { SyncState } from './sync-state.ts';
 import { SYNC_STATE_REL } from './sync-state.ts';
 import { DEFAULT_PIPELINE_CONFIG, type Manifest, type ManifestCellEntry } from './types.ts';
@@ -32,8 +47,12 @@ export interface RecoverPublishedStateOptions {
   fetchImpl?: typeof fetch;
   /** Tiempo máximo por petición (incluye lectura del cuerpo). */
   timeoutMs?: number;
-  /** Tiempo máximo total de la recuperación. */
+  /** Tiempo máximo total de la recuperación de precios. */
   totalTimeoutMs?: number;
+  /** Tiempo máximo adicional para geometrías (si hay g/). */
+  geometryTotalTimeoutMs?: number;
+  /** Concurrencia acotada al recuperar packs (default 8). */
+  geometryConcurrency?: number;
   /** Tamaño máximo de respuesta por archivo (bytes). */
   maxResponseBytes?: number;
   /** Máximo de celdas por manifiesto. */
@@ -57,7 +76,15 @@ const SOURCE_FECHA_RE = /^\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2}:\d{2}$/;
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_TOTAL_TIMEOUT_MS = 180_000;
-const DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+/** Geometría nacional + retención: margen amplio; no es wall-time de CDN. */
+const DEFAULT_GEOMETRY_TOTAL_TIMEOUT_MS = 600_000;
+/** Concurrencia acotada (packs); no elimina validación de hash/ruta/esquema. */
+const DEFAULT_GEOMETRY_CONCURRENCY = 8;
+/**
+ * Tope por archivo alineado al límite Free de Workers Static Assets (25 MiB).
+ * Antes 8 MiB podía rechazar packs municipales grandes sin ser un control de seguridad útil.
+ */
+const DEFAULT_MAX_RESPONSE_BYTES = 25 * 1024 * 1024;
 const DEFAULT_MAX_CELLS = 5_000;
 
 function fail(reason: string, code: RecoverFailureCode): RecoverOutcome {
@@ -503,6 +530,205 @@ function bodyMatchingHash(body: string, expectedSha: string): string | null {
   return null;
 }
 
+async function mapPool<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.max(1, concurrency) }, async () => {
+    for (;;) {
+      const i = next;
+      next += 1;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]!, i);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+type FetchAssetFn = (
+  rel: string,
+) => Promise<{ ok: true; body: string; status: number } | { ok: false; reason: string; code: RecoverFailureCode }>;
+
+async function recoverMunicipalityCellsIfPresent(input: {
+  fetchAsset: FetchAssetFn;
+  writeRel: (rel: string, body: string) => { ok: true } | { ok: false; reason: string };
+  staging: string;
+  manifest: Manifest;
+  declaredPath: string | undefined;
+}): Promise<{ ok: true } | { ok: false; reason: string; code: RecoverFailureCode }> {
+  const expected = municipalityCellsRelPath(input.manifest.datasetVersion);
+  const declared = input.declaredPath;
+
+  if (declared !== undefined) {
+    if (declared !== expected) {
+      return { ok: false, reason: 'municipalityCellsPath no canónico', code: 'incoherent' };
+    }
+    const fetched = await input.fetchAsset(declared);
+    if (!fetched.ok) {
+      return {
+        ok: false,
+        reason: `municipality-cells declarado pero irrecuperable: ${fetched.reason}`,
+        code: fetched.code === 'incomplete' ? 'incomplete' : fetched.code,
+      };
+    }
+    const parsedJson = parseJsonObject(fetched.body, declared);
+    if (!parsedJson.ok) return { ok: false, reason: parsedJson.reason, code: 'schema' };
+    const parsed = parseMunicipalityCellsDocument(parsedJson.value);
+    if (!parsed.ok) return { ok: false, reason: parsed.reason, code: 'schema' };
+    if (
+      parsed.doc.datasetVersion !== input.manifest.datasetVersion ||
+      parsed.doc.contentHash !== input.manifest.contentHash
+    ) {
+      return { ok: false, reason: 'municipality-cells versión incompatible con precios', code: 'incoherent' };
+    }
+    const written = input.writeRel(declared, normalizeBodyNewline(fetched.body));
+    if (!written.ok) return { ok: false, reason: written.reason, code: 'unsafe_path' };
+    return { ok: true };
+  }
+
+  // Sin declaración: intentar recuperar si existe (404 = legacy OK).
+  const probe = await input.fetchAsset(expected);
+  if (!probe.ok) {
+    if (probe.code === 'incomplete') return { ok: true };
+    return { ok: false, reason: probe.reason, code: probe.code };
+  }
+  const parsedJson = parseJsonObject(probe.body, expected);
+  if (!parsedJson.ok) return { ok: false, reason: parsedJson.reason, code: 'schema' };
+  const parsed = parseMunicipalityCellsDocument(parsedJson.value);
+  if (!parsed.ok) return { ok: false, reason: parsed.reason, code: 'schema' };
+  if (
+    parsed.doc.datasetVersion !== input.manifest.datasetVersion ||
+    parsed.doc.contentHash !== input.manifest.contentHash
+  ) {
+    return { ok: false, reason: 'municipality-cells huérfano con versión incompatible', code: 'incoherent' };
+  }
+  const written = input.writeRel(expected, normalizeBodyNewline(probe.body));
+  if (!written.ok) return { ok: false, reason: written.reason, code: 'unsafe_path' };
+  return { ok: true };
+}
+
+async function recoverGeometryTree(input: {
+  fetchAsset: FetchAssetFn;
+  writeRel: (rel: string, body: string) => { ok: true } | { ok: false; reason: string };
+  staging: string;
+  currentPointers: Record<string, unknown>;
+  concurrency: number;
+}): Promise<{ ok: true; geometry: GeometryCurrent | null } | { ok: false; reason: string; code: RecoverFailureCode }> {
+  const declared =
+    typeof input.currentPointers.geometryCurrentPath === 'string' ||
+    typeof input.currentPointers.geometryCatalogPath === 'string';
+
+  const geoCurrentFetch = await input.fetchAsset(GEOMETRY_CURRENT_REL);
+  if (!geoCurrentFetch.ok) {
+    if (geoCurrentFetch.code === 'incomplete') {
+      if (declared) {
+        return {
+          ok: false,
+          reason:
+            'current.json declara geometría pero g/current.json ausente (corrupción o despliegue incompleto; no es bootstrap)',
+          code: 'incomplete',
+        };
+      }
+      // CDN antiguo sin geometrías: OK
+      return { ok: true, geometry: null };
+    }
+    return { ok: false, reason: geoCurrentFetch.reason, code: geoCurrentFetch.code };
+  }
+
+  const geoCurrentParsed = parseJsonObject(geoCurrentFetch.body, GEOMETRY_CURRENT_REL);
+  if (!geoCurrentParsed.ok) return { ok: false, reason: geoCurrentParsed.reason, code: 'schema' };
+  const geoCurrent = parseGeometryCurrent(geoCurrentParsed.value);
+  if (!geoCurrent.ok) return { ok: false, reason: geoCurrent.reason, code: 'schema' };
+
+  if (declared) {
+    if (input.currentPointers.geometryCurrentPath !== GEOMETRY_CURRENT_REL) {
+      return { ok: false, reason: 'geometryCurrentPath no canónico', code: 'incoherent' };
+    }
+    if (input.currentPointers.geometryCatalogPath !== geoCurrent.value.manifestPath) {
+      return { ok: false, reason: 'geometryCatalogPath no coincide con g/current.json', code: 'incoherent' };
+    }
+  }
+
+  const writtenCurrent = input.writeRel(GEOMETRY_CURRENT_REL, normalizeBodyNewline(geoCurrentFetch.body));
+  if (!writtenCurrent.ok) return { ok: false, reason: writtenCurrent.reason, code: 'unsafe_path' };
+
+  const versions = [geoCurrent.value.geometryVersion, ...geoCurrent.value.retainedVersions];
+  for (const version of versions) {
+    const manifestRel = geometryManifestRel(version);
+    const catalogRel = geometryCatalogRel(version);
+    const manifestFetch = await input.fetchAsset(manifestRel);
+    if (!manifestFetch.ok) {
+      return {
+        ok: false,
+        reason: `Geometría ${version} incompleta (manifiesto): ${manifestFetch.reason}`,
+        code: manifestFetch.code === 'incomplete' ? 'incomplete' : manifestFetch.code,
+      };
+    }
+    const manifestJson = parseJsonObject(manifestFetch.body, manifestRel);
+    if (!manifestJson.ok) return { ok: false, reason: manifestJson.reason, code: 'schema' };
+    const manifest = parseGeometryCatalogManifest(manifestJson.value);
+    if (!manifest.ok) return { ok: false, reason: manifest.reason, code: 'schema' };
+    if (manifest.value.geometryVersion !== version) {
+      return { ok: false, reason: `geometryVersion carpeta ${version} incoherente`, code: 'incoherent' };
+    }
+
+    const catalogFetch = await input.fetchAsset(catalogRel);
+    if (!catalogFetch.ok) {
+      return {
+        ok: false,
+        reason: `Geometría ${version} incompleta (catálogo): ${catalogFetch.reason}`,
+        code: catalogFetch.code === 'incomplete' ? 'incomplete' : catalogFetch.code,
+      };
+    }
+    const catalogJson = parseJsonObject(catalogFetch.body, catalogRel);
+    if (!catalogJson.ok) return { ok: false, reason: catalogJson.reason, code: 'schema' };
+    const catalog = parseMunicipalityCatalog(catalogJson.value);
+    if (!catalog.ok) return { ok: false, reason: catalog.reason, code: 'schema' };
+    if (catalog.value.catalogVersion !== manifest.value.catalogVersion) {
+      return { ok: false, reason: `catalogVersion incoherente en ${version}`, code: 'incoherent' };
+    }
+
+    const wManifest = input.writeRel(manifestRel, normalizeBodyNewline(manifestFetch.body));
+    if (!wManifest.ok) return { ok: false, reason: wManifest.reason, code: 'unsafe_path' };
+    const wCatalog = input.writeRel(catalogRel, normalizeBodyNewline(catalogFetch.body));
+    if (!wCatalog.ok) return { ok: false, reason: wCatalog.reason, code: 'unsafe_path' };
+
+    const packResults = await mapPool(manifest.value.packs.files, input.concurrency, async (file) => {
+      const packFetch = await input.fetchAsset(file.path);
+      if (!packFetch.ok) {
+        return {
+          ok: false as const,
+          reason: `Pack ${file.path}: ${packFetch.reason}`,
+          code: packFetch.code,
+        };
+      }
+      const matched = bodyMatchingHash(packFetch.body, file.sha256);
+      if (!matched) {
+        return { ok: false as const, reason: `Hash distinto en pack ${file.path}`, code: 'hash_mismatch' as const };
+      }
+      const written = input.writeRel(file.path, matched);
+      if (!written.ok) {
+        return { ok: false as const, reason: written.reason, code: 'unsafe_path' as const };
+      }
+      return { ok: true as const };
+    });
+
+    for (const r of packResults) {
+      if (!r.ok) return { ok: false, reason: r.reason, code: r.code };
+    }
+
+    void (manifest.value as GeometryCatalogManifest);
+  }
+
+  const check = assertGeometryTreeCoherent(input.staging, { requirePresent: true });
+  if (!check.ok) return { ok: false, reason: check.reason, code: 'incoherent' };
+  return { ok: true, geometry: geoCurrent.value };
+}
+
 /**
  * Recupera el estado publicado desde una URL base (simula runner limpio).
  * Verifica manifiesto, esquema, hashes y archivos necesarios para comparación/retención.
@@ -520,6 +746,8 @@ export async function recoverPublishedState(
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const totalTimeoutMs = options.totalTimeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS;
+  const geometryTotalTimeoutMs = options.geometryTotalTimeoutMs ?? DEFAULT_GEOMETRY_TOTAL_TIMEOUT_MS;
+  const geometryConcurrency = options.geometryConcurrency ?? DEFAULT_GEOMETRY_CONCURRENCY;
   const maxBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
   const maxCells = options.maxCells ?? DEFAULT_MAX_CELLS;
   const maxRetained = options.retainPreviousVersions ?? DEFAULT_PIPELINE_CONFIG.retainPreviousVersions;
@@ -739,6 +967,45 @@ export async function recoverPublishedState(
           return fail(writtenCell.reason, 'unsafe_path');
         }
       }
+    }
+
+    // municipality-cells (activo): declarado → obligatorio; ausente sin declaración → legacy OK.
+    const cellsRecover = await recoverMunicipalityCellsIfPresent({
+      fetchAsset,
+      writeRel,
+      staging,
+      manifest: root.manifest,
+      declaredPath:
+        typeof currentParsed.value.municipalityCellsPath === 'string'
+          ? currentParsed.value.municipalityCellsPath
+          : undefined,
+    });
+    if (!cellsRecover.ok) {
+      cleanup();
+      return fail(cellsRecover.reason, cellsRecover.code);
+    }
+
+    // Extender deadline para geometrías nacionales (concurrencia acotada).
+    const geometryDeadlineMs = nowMs() + geometryTotalTimeoutMs;
+    const fetchGeometryAsset = (rel: string) =>
+      fetchText(fetchImpl, joinUrl(baseCheck.baseUrl, rel), {
+        timeoutMs,
+        maxBytes,
+        expectedOrigin: baseCheck.origin,
+        deadlineMs: geometryDeadlineMs,
+        nowMs,
+      });
+
+    const geometryRecover = await recoverGeometryTree({
+      fetchAsset: fetchGeometryAsset,
+      writeRel,
+      staging,
+      currentPointers: currentParsed.value,
+      concurrency: geometryConcurrency,
+    });
+    if (!geometryRecover.ok) {
+      cleanup();
+      return fail(geometryRecover.reason, geometryRecover.code);
     }
 
     // Cabeceras desde el código local (no del CDN).

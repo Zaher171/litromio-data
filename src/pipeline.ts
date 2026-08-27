@@ -212,10 +212,20 @@ export function runPipeline(input: RunPipelineInput): PipelineResult {
           },
         });
       }
+      const complete = assertPublishedTreeCoherent(store.liveDir);
+      if (!complete.ok) {
+        return finish({
+          outcome: 'failed_publish',
+          detail: `synced_unchanged dejó árbol incompleto: ${complete.reason}`,
+          datasetVersion: active.datasetVersion,
+          contentHash: dataset.contentHash,
+          activeDatasetVersion: active.datasetVersion,
+        });
+      }
       return finish({
         outcome: 'synced_unchanged',
         detail:
-          'content_hash idéntico; actualizada evidencia de consulta (sync.json / punteros mutables). Requiere publicar metadatos; no es “sin deploy”.',
+          'content_hash idéntico; actualizada evidencia de consulta (sync.json / punteros mutables). Requiere publicar metadatos; no es “sin deploy”. Árbol completo (precios + g/ si existe).',
         datasetVersion: active.datasetVersion,
         contentHash: dataset.contentHash,
         activeDatasetVersion: active.datasetVersion,

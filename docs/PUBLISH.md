@@ -4,6 +4,8 @@
 
 **Worker Cloudflare independiente** (`litromio-data`) con **Static Assets**, distinto del Worker de la aplicación privada Litromio.
 
+Soporte municipal (Fase 4D, local): ver [`docs/FASE-4D-MUNICIPAL.md`](FASE-4D-MUNICIPAL.md) — prefijo `g/{geometryVersion}/`, `municipality-cells.json`, recover/promote que conserva geometrías. Sin segundo Worker.
+
 | Aspecto | Decisión |
 | --- | --- |
 | CDN | Workers Static Assets (no GitHub Pages, no `raw.githubusercontent.com`, no artefactos Actions como CDN de producción) |
@@ -62,7 +64,11 @@ Tras publish exitoso (`out/live/`):
 - `_headers`
 - `v/<16 hex>/manifest.json`
 - `v/<16 hex>/cells/*.json`
-- Opcional: retención de `v/<versión anterior>/`
+- Opcional: `v/<16 hex>/municipality-cells.json` + punteros municipales en `current.json`
+- Opcional: `g/current.json`, `g/<geometryVersion>/…` (ciclo A; no regenerar en sync de precios)
+- Opcional: retención de `v/<versión anterior>/` y `g/<geometría anterior>/`
+
+Primera incorporación remota de `g/`: procedimiento y concurrencia en [`docs/FASE-4D-MUNICIPAL.md`](FASE-4D-MUNICIPAL.md). No ejecutar geometry-publish/deploy sin autorización; un job Actions antiguo o un deploy local paralelo puede publicar un árbol sin geometrías.
 
 ## Generación local vs publicación remota
 

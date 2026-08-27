@@ -20,6 +20,9 @@ Workflow activo en `.github/workflows/update-data.yml`. Ejemplo histórico en `e
 | Datos antiguos | La app Litromio debe avisar si `lastSuccessfulFetchAt` supera el umbral (`docs/CONSISTENCY.md`) |
 | Artefactos | No usar como CDN ni como única fuente de verdad entre runners |
 | Deploy | Condicionado a `needsDeploy`; verificación HTTP post-deploy |
+| Concurrencia GHA | `concurrency.group: litromio-data-update`, `cancel-in-progress: false` → jobs en cola; uno antiguo **termina** y puede desplegar |
+| Deploy local | `wrangler deploy` manual **no** participa en ese grupo; puede pisar/ser pisado por Actions |
+| 1ª geometría | Pausar workflow (Disable en UI, sin editar cron YAML), drenar runs activos/pendientes, publicar, ciclo precios controlado, luego Enable — ver `docs/FASE-4D-MUNICIPAL.md` |
 
 ## SHAs fijados en el ejemplo (verificados 2026-08-27)
 

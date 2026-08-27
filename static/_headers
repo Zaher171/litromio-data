@@ -1,6 +1,7 @@
 # Cabeceras para Static Assets (Workers).
 # Se copia a out/live en cada publicación. No inventar orígenes concretos.
 # CORS: la app privada consumirá JSON desde otro origen.
+# Nota: si varias reglas coinciden, suele prevalecer la última → /g/current.json va después de /g/*.
 
 /*
   Access-Control-Allow-Origin: *
@@ -18,3 +19,10 @@
 
 /v/*
   Cache-Control: public, max-age=31536000, immutable
+
+/g/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/g/current.json
+  Cache-Control: public, max-age=60, must-revalidate
+*/

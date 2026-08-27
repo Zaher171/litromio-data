@@ -216,6 +216,14 @@ describe('generación determinista', () => {
     for (const [rel, body] of a.files) {
       if (rel === 'manifest.json' || rel === 'current.json') continue;
       if (rel.endsWith('/manifest.json')) continue;
+      if (rel.endsWith('/municipality-cells.json')) {
+        const left = JSON.parse(body) as Record<string, unknown>;
+        const right = JSON.parse(b.files.get(rel)!) as Record<string, unknown>;
+        delete left.generatedAt;
+        delete right.generatedAt;
+        expect(left).toEqual(right);
+        continue;
+      }
       expect(b.files.get(rel)).toBe(body);
     }
   });

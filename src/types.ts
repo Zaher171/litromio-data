@@ -178,6 +178,8 @@ export interface PipelineConfig {
   minStationCountAbsolute: number;
   minStationCountRatioOfActive: number;
   retainPreviousVersions: number;
+  /** Retención acotada de versiones geométricas bajo g/ (default 1). */
+  retainGeometryVersions: number;
   staleAfterMinutes: number;
   leaseTtlMs: number;
   grid: GridConfig;
@@ -193,6 +195,7 @@ export const DEFAULT_PIPELINE_CONFIG: PipelineConfig = {
   minStationCountAbsolute: 8_000,
   minStationCountRatioOfActive: 0.9,
   retainPreviousVersions: 1,
+  retainGeometryVersions: 1,
   staleAfterMinutes: 90,
   leaseTtlMs: 15 * 60 * 1000,
   grid: DEFAULT_GRID,

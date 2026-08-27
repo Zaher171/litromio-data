@@ -1,6 +1,13 @@
 import { createHash } from 'node:crypto';
+import {
+  buildMunicipalityCellsDocument,
+  municipalityCellsRelPath,
+  serializeMunicipalityCellsDocument,
+  validateMunicipalityCellsCoverage,
+} from './municipality-cells.ts';
 import { cellForLatLonText } from './partition.ts';
 import type {
+  CellFile,
   GenerateResult,
   GridConfig,
   Manifest,
@@ -87,12 +94,14 @@ export function generatePartitionedDataset(
 
   const files = new Map<string, string>();
   const cellEntries: ManifestCellEntry[] = [];
+  const cellFiles: CellFile[] = [];
+  const stationCellIds: { idMunicipality: string; cellId: string }[] = [];
   let totalBytes = 0;
   const sortedCellIds = [...buckets.keys()].sort((a, b) => a.localeCompare(b));
 
   for (const cellId of sortedCellIds) {
     const stations = buckets.get(cellId) ?? [];
-    const cellBody = {
+    const cellBody: CellFile = {
       cellId,
       datasetVersion,
       contentHash: dataset.contentHash,
@@ -105,8 +114,29 @@ export function generatePartitionedDataset(
     const bytes = Buffer.byteLength(body, 'utf8');
     files.set(path, body);
     cellEntries.push({ id: cellId, path, count: stations.length, sha256, bytes });
+    cellFiles.push(cellBody);
+    for (const st of stations) {
+      stationCellIds.push({ idMunicipality: st.idMunicipality, cellId });
+    }
     totalBytes += bytes;
   }
+
+  const municipalityCells = buildMunicipalityCellsDocument({
+    datasetVersion,
+    contentHash: dataset.contentHash,
+    stations: cellFiles.flatMap((c) => c.stations),
+    stationCellIds,
+    grid,
+    generatedAt: options.downloadedAt,
+  });
+  const coverage = validateMunicipalityCellsCoverage({ doc: municipalityCells, cells: cellFiles });
+  if (!coverage.ok) {
+    throw new Error(coverage.reason);
+  }
+  const municipalityCellsPath = municipalityCellsRelPath(datasetVersion);
+  const municipalityCellsBody = serializeMunicipalityCellsDocument(municipalityCells);
+  files.set(municipalityCellsPath, municipalityCellsBody);
+  totalBytes += Buffer.byteLength(municipalityCellsBody, 'utf8');
 
   const publishedAt = options.publishedAt === undefined ? null : options.publishedAt;
 
@@ -150,6 +180,8 @@ export function generatePartitionedDataset(
     downloadedAt: options.downloadedAt,
     publishedAt,
     manifestPath: versionedManifestPath,
+    /** Opcional: clientes antiguos ignoran. */
+    municipalityCellsPath,
     staleAfterMinutes: config.staleAfterMinutes,
     attribution: { ...ATTRIBUTION },
   };
