@@ -54,18 +54,23 @@ function isCompletenessAcceptable(
 /**
  * ¿La consulta es más antigua que la última observación aceptada?
  * Compara `Fecha` vía `parseFuenteFechaToEpoch` (Europe/Madrid); sin orden lexicográfico dd/mm.
- * Si alguna fecha no parsea → se considera no aceptable (stale).
  */
-function isStaleAgainstLastObserved(
+function compareAgainstLastObserved(
   candidate: { sourceFecha: string; downloadedAt: string },
   baseline: { lastObservedSourceFecha: string; downloadedAt: string },
-): boolean {
+):
+  | { kind: 'ok' }
+  | { kind: 'stale' }
+  | { kind: 'unparseable'; which: 'candidate' | 'baseline' | 'both' } {
   const cEpoch = parseFuenteFechaToEpoch(candidate.sourceFecha);
   const bEpoch = parseFuenteFechaToEpoch(baseline.lastObservedSourceFecha);
-  if (cEpoch === null || bEpoch === null) return true;
-  if (cEpoch < bEpoch) return true;
-  if (cEpoch > bEpoch) return false;
-  return candidate.downloadedAt < baseline.downloadedAt;
+  if (cEpoch === null && bEpoch === null) return { kind: 'unparseable', which: 'both' };
+  if (cEpoch === null) return { kind: 'unparseable', which: 'candidate' };
+  if (bEpoch === null) return { kind: 'unparseable', which: 'baseline' };
+  if (cEpoch < bEpoch) return { kind: 'stale' };
+  if (cEpoch > bEpoch) return { kind: 'ok' };
+  if (candidate.downloadedAt < baseline.downloadedAt) return { kind: 'stale' };
+  return { kind: 'ok' };
 }
 
 export interface RunPipelineInput {
@@ -171,16 +176,43 @@ export function runPipeline(input: RunPipelineInput): PipelineResult {
         syncState?.lastObservedSourceFecha ?? syncState?.sourceFecha ?? active.sourceFecha;
       const baselineDownloadedAt =
         syncState?.lastSuccessfulFetchAt ?? active.lastSuccessfulFetchAt ?? active.downloadedAt;
-      if (
-        isStaleAgainstLastObserved(
-          { sourceFecha: dataset.sourceFecha, downloadedAt: input.downloadedAt },
-          { lastObservedSourceFecha, downloadedAt: baselineDownloadedAt },
-        )
-      ) {
+      const cmp = compareAgainstLastObserved(
+        { sourceFecha: dataset.sourceFecha, downloadedAt: input.downloadedAt },
+        { lastObservedSourceFecha, downloadedAt: baselineDownloadedAt },
+      );
+      if (cmp.kind === 'unparseable') {
+        const whichLabel =
+          cmp.which === 'candidate'
+            ? `candidato (${dataset.sourceFecha})`
+            : cmp.which === 'baseline'
+              ? `baseline (${lastObservedSourceFecha})`
+              : `candidato (${dataset.sourceFecha}) y baseline (${lastObservedSourceFecha})`;
+        return finish({
+          outcome: 'failed_validation',
+          detail: `Fecha no interpretable en Europe/Madrid: ${whichLabel}`,
+          datasetVersion: null,
+          contentHash: dataset.contentHash,
+          activeDatasetVersion: active.datasetVersion,
+          metrics: {
+            ...emptyMetrics(Date.now() - t0),
+            stationCount: dataset.stations.length,
+            priceCount: dataset.prices.length,
+          },
+        });
+      }
+      if (cmp.kind === 'stale') {
+        const cEpoch = parseFuenteFechaToEpoch(dataset.sourceFecha);
+        const bEpoch = parseFuenteFechaToEpoch(lastObservedSourceFecha);
         return finish({
           outcome: 'abandoned_stale',
           detail:
-            'La consulta es anterior a la última Fecha observada aceptada (o downloaded_at más antiguo a igualdad de Fecha)',
+            `La consulta es anterior a la última Fecha observada aceptada (o downloaded_at más antiguo a igualdad de Fecha)` +
+            ` | candidateFecha=${dataset.sourceFecha}` +
+            ` candidateUtc=${cEpoch != null ? new Date(cEpoch).toISOString() : 'null'}` +
+            ` downloadedAt=${input.downloadedAt}` +
+            ` | lastObservedSourceFecha=${lastObservedSourceFecha}` +
+            ` baselineUtc=${bEpoch != null ? new Date(bEpoch).toISOString() : 'null'}` +
+            ` lastSuccessfulFetchAt=${baselineDownloadedAt}`,
           datasetVersion: null,
           contentHash: dataset.contentHash,
           activeDatasetVersion: active.datasetVersion,

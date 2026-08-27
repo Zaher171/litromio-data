@@ -608,9 +608,53 @@ describe('parseFuenteFechaToEpoch (Europe/Madrid)', () => {
     expect('01/02/2026 12:00:00' < '02/01/2026 12:00:00').toBe(true);
   });
 
-  it('rechaza formato inválido', () => {
+  it('acepta hora sin cero (formato real de la API tras medianoche)', () => {
+    const unpadded = parseFuenteFechaToEpoch('28/08/2026 1:04:32');
+    const padded = parseFuenteFechaToEpoch('28/08/2026 01:04:32');
+    expect(unpadded).not.toBeNull();
+    expect(padded).not.toBeNull();
+    expect(unpadded).toBe(padded);
+    expect(new Date(unpadded!).toISOString()).toBe('2026-08-27T23:04:32.000Z');
+    const midnight = parseFuenteFechaToEpoch('28/08/2026 0:59:00');
+    expect(midnight).not.toBeNull();
+    expect(new Date(midnight!).toISOString()).toBe('2026-08-27T22:59:00.000Z');
+  });
+
+  it('rechaza formato inválido y componentes fuera de rango', () => {
     expect(parseFuenteFechaToEpoch('2026-08-27T12:00:00')).toBeNull();
     expect(parseFuenteFechaToEpoch('27-08-2026 12:00:00')).toBeNull();
+    expect(parseFuenteFechaToEpoch('32/08/2026 1:00:00')).toBeNull();
+    expect(parseFuenteFechaToEpoch('28/13/2026 1:00:00')).toBeNull();
+    expect(parseFuenteFechaToEpoch('28/08/2026 24:00:00')).toBeNull();
+    expect(parseFuenteFechaToEpoch('28/08/2026 1:60:00')).toBeNull();
+  });
+});
+
+describe('cambio de día Madrid: hora sin pad no es retroceso', () => {
+  it('Fecha posterior con hora 1 dígito no produce abandoned_stale', () => {
+    const out = tmpOut();
+    expect(
+      runPipeline({
+        runId: 'r1',
+        outRoot: out,
+        payload: payload(manyStations(5, '1,500'), '27/08/2026 20:56:28'),
+        downloadedAt: '2026-08-27T18:56:50.773Z',
+        startedAt: '2026-08-27T18:56:51.000Z',
+        config: testConfig,
+      }).outcome,
+    ).toBe('published');
+
+    const next = runPipeline({
+      runId: 'r2',
+      outRoot: out,
+      payload: payload(manyStations(5, '1,510'), '28/08/2026 1:00:07'),
+      downloadedAt: '2026-08-27T23:00:07.000Z',
+      startedAt: '2026-08-27T23:00:08.000Z',
+      config: testConfig,
+    });
+    expect(next.outcome).not.toBe('abandoned_stale');
+    expect(next.outcome).not.toBe('failed_validation');
+    expect(['published', 'synced_unchanged']).toContain(next.outcome);
   });
 });
 

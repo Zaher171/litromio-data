@@ -36,7 +36,7 @@ El ministerio se reserva medidas técnicas ante uso abusivo o robotizado. Diseñ
 | `contentPublishedAt` / `publishedAt` | Instantánea ISO de publicación del contenido; no se mueve en sync-only |
 | `downloadedAt` | En punteros mutables se alinea con `lastSuccessfulFetchAt` tras sync de frescura |
 
-La `Fecha` oficial se interpreta en zona **Europe/Madrid** (`parseFuenteFechaToEpoch`). No comparar cadenas `dd/MM/yyyy` lexicográficamente.
+La `Fecha` oficial se interpreta en zona **Europe/Madrid** (`parseFuenteFechaToEpoch`). Formato observado: `d/M/yyyy H:mm:ss` (día/mes/hora pueden ir sin cero; p. ej. `28/08/2026 1:04:32` tras medianoche). No comparar cadenas lexicográficamente.
 
 `contentHash` / `datasetVersion` identifican solo el contenido normalizado (estaciones y precios); **no** incluyen fechas de consulta.
 

@@ -182,12 +182,19 @@ export function hashDataset(stations: StationRecord[], prices: PriceRecord[]): s
 export const FUENTE_TIME_ZONE = 'Europe/Madrid';
 
 /**
- * Parsea `Fecha` de la fuente ("dd/MM/yyyy HH:mm:ss") a epoch ms (UTC),
- * interpretando la hora de pared en `Europe/Madrid` (no comparación lexicográfica).
+ * Parsea `Fecha` de la fuente ("d/M/yyyy H:mm:ss", con o sin ceros a la izquierda)
+ * a epoch ms (UTC), interpretando la hora de pared en `Europe/Madrid`
+ * (no comparación lexicográfica).
+ *
+ * La API oficial puede omitir el cero en la hora tras medianoche peninsular
+ * (p. ej. `28/08/2026 1:04:32`). Exigir siempre `HH` devolvía null y el pipeline
+ * lo confundía con retroceso (`abandoned_stale`).
+ *
  * Devuelve null si no se puede interpretar o el instante no existe en esa zona.
  */
 export function parseFuenteFechaToEpoch(fecha: string): number | null {
-  const m = /^(\d{2})\/(\d{2})\/(\d{4}) (\d{2}):(\d{2}):(\d{2})$/.exec(fecha.trim());
+  // Día/mes/hora: 1–2 dígitos; minutos/segundos: siempre 2 (observado en la API).
+  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4}) (\d{1,2}):(\d{2}):(\d{2})$/.exec(fecha.trim());
   if (!m) return null;
   const day = Number(m[1]);
   const month = Number(m[2]);
@@ -196,6 +203,8 @@ export function parseFuenteFechaToEpoch(fecha: string): number | null {
   const minute = Number(m[5]);
   const second = Number(m[6]);
   if (![day, month, year, hour, minute, second].every((n) => Number.isFinite(n))) return null;
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  if (hour > 23 || minute > 59 || second > 59) return null;
 
   const dtf = new Intl.DateTimeFormat('en-GB', {
     timeZone: FUENTE_TIME_ZONE,

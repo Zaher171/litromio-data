@@ -89,6 +89,8 @@ Si `contentHash` coincide con el activo y la `Fecha` observada es **igual o post
 
 Si la `Fecha` observada es **anterior** a `lastObservedSourceFecha` → `abandoned_stale` (antes de decidir sync vs publish). Comparación vía `parseFuenteFechaToEpoch` (Europe/Madrid), no lexicográfica.
 
+La API puede devolver la hora **sin cero a la izquierda** tras medianoche peninsular (`28/08/2026 1:04:32`). El parser debe aceptarla; un fallo de parseo **no** es retroceso: se reporta como `failed_validation`, no como `abandoned_stale`.
+
 ### Publicaciones diarias (recalculo)
 
 Objetivo ~cada 30 min → hasta **~48 ciclos/día**.
