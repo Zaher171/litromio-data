@@ -15,6 +15,7 @@ import {
   neighboringCellIds,
   normalizePriceText,
   parseAndValidateFuentePayload,
+  parseFuenteFechaToEpoch,
   readLiveManifest,
   readSyncState,
   recoverPublishedState,
@@ -464,6 +465,7 @@ describe('pipeline local', () => {
     const version = readLiveManifest(live)!.datasetVersion;
     const before = snapshotImmutable(live, version);
     const contentPublishedAt = readSyncState(live)!.contentPublishedAt;
+    const contentSourceFecha = readSyncState(live)!.sourceFecha;
 
     const sync = runPipeline({
       runId: 'r2',
@@ -475,11 +477,15 @@ describe('pipeline local', () => {
     });
     expect(sync.outcome).toBe('synced_unchanged');
     expect(sync.needsDeploy).toBe(true);
+    expect(sync.metrics.stationCount).toBe(5);
+    expect(sync.metrics.priceCount).toBeGreaterThan(0);
 
     const after = snapshotImmutable(live, version);
     expect(after).toEqual(before);
     expect(readSyncState(live)?.lastSuccessfulFetchAt).toBe('2026-08-27T12:30:00.000Z');
     expect(readSyncState(live)?.contentPublishedAt).toBe(contentPublishedAt);
+    expect(readSyncState(live)?.sourceFecha).toBe(contentSourceFecha);
+    expect(readSyncState(live)?.lastObservedSourceFecha).toBe(contentSourceFecha);
     expect(readLiveManifest(live)?.lastSuccessfulFetchAt).toBe('2026-08-27T12:30:00.000Z');
   });
 
@@ -580,6 +586,273 @@ describe('pipeline local', () => {
     expect(isManifestStale('2026-08-27T11:00:00.000Z', 90, Date.parse('2026-08-27T12:00:00.000Z'))).toBe(
       false,
     );
+  });
+});
+
+describe('parseFuenteFechaToEpoch (Europe/Madrid)', () => {
+  it('parsea Fecha y ordena por instante, no por lexicografía dd/mm', () => {
+    const jan2 = parseFuenteFechaToEpoch('02/01/2026 12:00:00');
+    const feb1 = parseFuenteFechaToEpoch('01/02/2026 12:00:00');
+    expect(jan2).not.toBeNull();
+    expect(feb1).not.toBeNull();
+    expect(feb1!).toBeGreaterThan(jan2!);
+    // Lexicográficamente "01/02..." < "02/01..."; cronológicamente es al revés.
+    expect('01/02/2026 12:00:00' < '02/01/2026 12:00:00').toBe(true);
+  });
+
+  it('rechaza formato inválido', () => {
+    expect(parseFuenteFechaToEpoch('2026-08-27T12:00:00')).toBeNull();
+    expect(parseFuenteFechaToEpoch('27-08-2026 12:00:00')).toBeNull();
+  });
+});
+
+describe('frescura con Fecha distinta y mismo contentHash', () => {
+  it('mismo contenido y fecha posterior: sincroniza frescura', () => {
+    const out = tmpOut();
+    const stations = manyStations(5, '1,500');
+    expect(
+      runPipeline({
+        runId: 'r1',
+        outRoot: out,
+        payload: payload(stations, '27/08/2026 16:54:39'),
+        downloadedAt: '2026-08-27T14:54:44.119Z',
+        startedAt: '2026-08-27T14:54:45.000Z',
+        config: testConfig,
+      }).outcome,
+    ).toBe('published');
+
+    const live = createStorePaths(out).liveDir;
+    const version = readLiveManifest(live)!.datasetVersion;
+    const before = snapshotImmutable(live, version);
+    const contentPublishedAt = readSyncState(live)!.contentPublishedAt;
+    const contentSourceFecha = '27/08/2026 16:54:39';
+
+    const sync = runPipeline({
+      runId: 'r2',
+      outRoot: out,
+      payload: payload(stations, '27/08/2026 17:00:40'),
+      downloadedAt: '2026-08-27T15:01:00.000Z',
+      startedAt: '2026-08-27T15:01:01.000Z',
+      config: testConfig,
+    });
+    expect(sync.outcome).toBe('synced_unchanged');
+    expect(sync.needsDeploy).toBe(true);
+    expect(sync.datasetVersion).toBe(version);
+    expect(sync.metrics.stationCount).toBe(5);
+    expect(sync.metrics.priceCount).toBeGreaterThan(0);
+
+    expect(snapshotImmutable(live, version)).toEqual(before);
+    const state = readSyncState(live)!;
+    expect(state.sourceFecha).toBe(contentSourceFecha);
+    expect(state.lastObservedSourceFecha).toBe('27/08/2026 17:00:40');
+    expect(state.lastSuccessfulFetchAt).toBe('2026-08-27T15:01:00.000Z');
+    expect(state.contentPublishedAt).toBe(contentPublishedAt);
+    expect(readLiveManifest(live)?.sourceFecha).toBe(contentSourceFecha);
+    const current = JSON.parse(fs.readFileSync(path.join(live, 'current.json'), 'utf8')) as {
+      sourceFecha: string;
+    };
+    expect(current.sourceFecha).toBe(contentSourceFecha);
+  });
+
+  it('mismo contenido y fecha anterior: rechazada sin mutación', () => {
+    const out = tmpOut();
+    const stations = manyStations(5, '1,500');
+    expect(
+      runPipeline({
+        runId: 'r1',
+        outRoot: out,
+        payload: payload(stations, '27/08/2026 17:00:40'),
+        downloadedAt: '2026-08-27T15:00:00.000Z',
+        startedAt: '2026-08-27T15:00:01.000Z',
+        config: testConfig,
+      }).outcome,
+    ).toBe('published');
+
+    const live = createStorePaths(out).liveDir;
+    const version = readLiveManifest(live)!.datasetVersion;
+    const beforeImm = snapshotImmutable(live, version);
+    const beforeSync = fs.readFileSync(path.join(live, 'sync.json'), 'utf8');
+    const beforeManifest = fs.readFileSync(path.join(live, 'manifest.json'), 'utf8');
+
+    const stale = runPipeline({
+      runId: 'r2',
+      outRoot: out,
+      payload: payload(stations, '27/08/2026 16:54:39'),
+      downloadedAt: '2026-08-27T15:05:00.000Z',
+      startedAt: '2026-08-27T15:05:01.000Z',
+      config: testConfig,
+    });
+    expect(stale.outcome).toBe('abandoned_stale');
+    expect(stale.needsDeploy).toBe(false);
+    expect(snapshotImmutable(live, version)).toEqual(beforeImm);
+    expect(fs.readFileSync(path.join(live, 'sync.json'), 'utf8')).toBe(beforeSync);
+    expect(fs.readFileSync(path.join(live, 'manifest.json'), 'utf8')).toBe(beforeManifest);
+  });
+
+  it('contenido distinto con fecha anterior a lastObservedSourceFecha: rechazado', () => {
+    const out = tmpOut();
+    expect(
+      runPipeline({
+        runId: 'r1',
+        outRoot: out,
+        payload: payload(manyStations(5, '1,500'), '27/08/2026 17:00:40'),
+        downloadedAt: '2026-08-27T15:00:00.000Z',
+        startedAt: '2026-08-27T15:00:01.000Z',
+        config: testConfig,
+      }).outcome,
+    ).toBe('published');
+    const live = createStorePaths(out).liveDir;
+    const v1 = readLiveManifest(live)!.datasetVersion;
+
+    // Avanza lastObserved sin cambiar precios.
+    expect(
+      runPipeline({
+        runId: 'r2',
+        outRoot: out,
+        payload: payload(manyStations(5, '1,500'), '27/08/2026 17:30:00'),
+        downloadedAt: '2026-08-27T15:30:00.000Z',
+        startedAt: '2026-08-27T15:30:01.000Z',
+        config: testConfig,
+      }).outcome,
+    ).toBe('synced_unchanged');
+    expect(readSyncState(live)?.lastObservedSourceFecha).toBe('27/08/2026 17:30:00');
+
+    const staleChange = runPipeline({
+      runId: 'r3',
+      outRoot: out,
+      payload: payload(manyStations(5, '1,999'), '27/08/2026 17:10:00'),
+      downloadedAt: '2026-08-27T15:35:00.000Z',
+      startedAt: '2026-08-27T15:35:01.000Z',
+      config: testConfig,
+    });
+    expect(staleChange.outcome).toBe('abandoned_stale');
+    expect(readLiveManifest(live)?.datasetVersion).toBe(v1);
+  });
+
+  it('no usa orden lexicográfico dd/mm al decidir stale', () => {
+    const out = tmpOut();
+    // 2 de enero publicado; 1 de febrero (lexicográficamente "menor") debe aceptarse.
+    expect(
+      runPipeline({
+        runId: 'r1',
+        outRoot: out,
+        payload: payload(manyStations(5, '1,500'), '02/01/2026 12:00:00'),
+        downloadedAt: '2026-01-02T11:00:00.000Z',
+        startedAt: '2026-01-02T11:00:01.000Z',
+        config: testConfig,
+      }).outcome,
+    ).toBe('published');
+
+    const later = runPipeline({
+      runId: 'r2',
+      outRoot: out,
+      payload: payload(manyStations(5, '1,510'), '01/02/2026 12:00:00'),
+      downloadedAt: '2026-02-01T11:00:00.000Z',
+      startedAt: '2026-02-01T11:00:01.000Z',
+      config: testConfig,
+    });
+    expect(later.outcome).toBe('published');
+  });
+});
+
+describe('recover sync legacy y formato nuevo', () => {
+  it('recover del formato publicado sin lastObservedSourceFecha y actualización al nuevo', async () => {
+    const publisher = tmpOut();
+    expect(
+      runPipeline({
+        runId: 'pub',
+        outRoot: publisher,
+        payload: payload(manyStations(5, '1,500'), '27/08/2026 16:54:39'),
+        downloadedAt: '2026-08-27T14:54:44.119Z',
+        startedAt: '2026-08-27T14:54:45.000Z',
+        config: testConfig,
+      }).outcome,
+    ).toBe('published');
+
+    const livePub = createStorePaths(publisher).liveDir;
+    const versionedBefore = snapshotImmutable(livePub, readLiveManifest(livePub)!.datasetVersion);
+
+    // Simula sync ya publicado (sin el campo nuevo).
+    const legacySync = JSON.parse(fs.readFileSync(path.join(livePub, 'sync.json'), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    delete legacySync.lastObservedSourceFecha;
+    expect(legacySync.lastObservedSourceFecha).toBeUndefined();
+    fs.writeFileSync(path.join(livePub, 'sync.json'), `${JSON.stringify(legacySync)}\n`, 'utf8');
+
+    const runner = tmpOut();
+    const { baseUrl, close } = await serveDir(livePub);
+    const recovered = await recoverPublishedState({
+      publicBaseUrl: baseUrl,
+      outRoot: runner,
+      allowHttpLocal: true,
+    });
+    await close();
+    expect(recovered.ok).toBe(true);
+    if (!recovered.ok) throw new Error(recovered.reason);
+
+    const liveRunner = createStorePaths(runner).liveDir;
+    const adapted = readSyncState(liveRunner)!;
+    expect(adapted.lastObservedSourceFecha).toBe('27/08/2026 16:54:39');
+    expect(adapted.sourceFecha).toBe('27/08/2026 16:54:39');
+    expect(assertPublishedTreeCoherent(liveRunner)).toEqual({ ok: true });
+    // Adaptación no toca versionados del origen (servidos intactos) ni del runner.
+    expect(snapshotImmutable(liveRunner, adapted.datasetVersion)).toEqual(versionedBefore);
+
+    const syncLater = runPipeline({
+      runId: 'after-recover',
+      outRoot: runner,
+      payload: payload(manyStations(5, '1,500'), '27/08/2026 17:00:40'),
+      downloadedAt: '2026-08-27T15:01:00.000Z',
+      startedAt: '2026-08-27T15:01:01.000Z',
+      config: { ...testConfig, allowEmptyPublish: false },
+    });
+    expect(syncLater.outcome).toBe('synced_unchanged');
+    expect(readSyncState(liveRunner)?.lastObservedSourceFecha).toBe('27/08/2026 17:00:40');
+    expect(snapshotImmutable(liveRunner, adapted.datasetVersion)).toEqual(versionedBefore);
+  });
+
+  it('recuperación posterior del nuevo formato', async () => {
+    const publisher = tmpOut();
+    const stations = manyStations(5, '1,500');
+    expect(
+      runPipeline({
+        runId: 'pub',
+        outRoot: publisher,
+        payload: payload(stations, '27/08/2026 16:54:39'),
+        downloadedAt: '2026-08-27T14:54:44.119Z',
+        startedAt: '2026-08-27T14:54:45.000Z',
+        config: testConfig,
+      }).outcome,
+    ).toBe('published');
+    expect(
+      runPipeline({
+        runId: 'freshen',
+        outRoot: publisher,
+        payload: payload(stations, '27/08/2026 17:00:40'),
+        downloadedAt: '2026-08-27T15:01:00.000Z',
+        startedAt: '2026-08-27T15:01:01.000Z',
+        config: testConfig,
+      }).outcome,
+    ).toBe('synced_unchanged');
+
+    const livePub = createStorePaths(publisher).liveDir;
+    expect(readSyncState(livePub)?.lastObservedSourceFecha).toBe('27/08/2026 17:00:40');
+
+    const runner = tmpOut();
+    const { baseUrl, close } = await serveDir(livePub);
+    const recovered = await recoverPublishedState({
+      publicBaseUrl: baseUrl,
+      outRoot: runner,
+      allowHttpLocal: true,
+    });
+    await close();
+    expect(recovered.ok).toBe(true);
+    if (!recovered.ok) throw new Error(recovered.reason);
+    const sync = readSyncState(createStorePaths(runner).liveDir)!;
+    expect(sync.lastObservedSourceFecha).toBe('27/08/2026 17:00:40');
+    expect(sync.sourceFecha).toBe('27/08/2026 16:54:39');
   });
 });
 

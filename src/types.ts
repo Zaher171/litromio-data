@@ -128,7 +128,7 @@ export interface Manifest {
   schemaVersion: 1;
   datasetVersion: string;
   contentHash: string;
-  /** Fecha/hora global de la respuesta oficial (`Fecha`). */
+  /** Fecha/hora de la fuente (`Fecha`) con la que se publicó este contenido. */
   sourceFecha: string;
   /**
    * Instantánea ISO de la descarga asociada a este conjunto.
@@ -138,6 +138,7 @@ export interface Manifest {
   /**
    * Última descarga y validación exitosa (punteros mutables / sync).
    * Distinta de `publishedAt` del contenido cuando solo se actualiza frescura.
+   * Ver también `lastObservedSourceFecha` en `sync.json`.
    */
   lastSuccessfulFetchAt?: string;
   /**

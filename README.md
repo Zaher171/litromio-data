@@ -15,7 +15,7 @@ No contiene la aplicación Litromio, su historial Git, secretos ni configuració
 ## Qué genera
 
 - JSON particionado por **cuadrícula geográfica** 0,5° (WGS84).
-- `manifest.json` / `current.json` / `sync.json` con atribución y tres relojes: `sourceFecha`, `lastSuccessfulFetchAt`, `publishedAt`.
+- `manifest.json` / `current.json` / `sync.json` con atribución y relojes: `sourceFecha` (contenido), `lastObservedSourceFecha` (última consulta), `lastSuccessfulFetchAt`, `contentPublishedAt` / `publishedAt`.
 - Precios como texto (precisión preservada); `IDEESS` como id estable.
 - Validación del árbol completo antes de reemplazar `live/`.
 - `synced_unchanged` actualiza frescura mutable (requiere deploy de metadatos); no muta `v/…`.

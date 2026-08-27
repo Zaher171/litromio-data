@@ -30,9 +30,15 @@ El ministerio se reserva medidas técnicas ante uso abusivo o robotizado. Diseñ
 
 | Campo | Significado |
 | --- | --- |
-| `sourceFecha` | Campo `Fecha` de la respuesta oficial |
-| `downloadedAt` | Instantánea ISO de la descarga en el pipeline |
-| `publishedAt` | Instantánea ISO de publicación del conjunto (local o CDN) |
+| `sourceFecha` | `Fecha` de la fuente con la que se publicó el **contenido** activo (`datasetVersion`). En manifiestos versionados es inmutable. |
+| `lastObservedSourceFecha` | `Fecha` de la fuente en la **última consulta válida** aceptada (`sync.json`). Puede avanzar sin cambio de precios. |
+| `lastSuccessfulFetchAt` | Instantánea ISO de esa descarga y validación exitosa |
+| `contentPublishedAt` / `publishedAt` | Instantánea ISO de publicación del contenido; no se mueve en sync-only |
+| `downloadedAt` | En punteros mutables se alinea con `lastSuccessfulFetchAt` tras sync de frescura |
+
+La `Fecha` oficial se interpreta en zona **Europe/Madrid** (`parseFuenteFechaToEpoch`). No comparar cadenas `dd/MM/yyyy` lexicográficamente.
+
+`contentHash` / `datasetVersion` identifican solo el contenido normalizado (estaciones y precios); **no** incluyen fechas de consulta.
 
 ## Qué no se versiona en Git
 

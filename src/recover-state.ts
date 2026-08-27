@@ -322,7 +322,7 @@ function validateSync(
   value: Record<string, unknown>,
   active: Manifest,
   maxRetained: number,
-): { ok: true; sync: SyncState } | { ok: false; reason: string } {
+): { ok: true; sync: SyncState; adaptedFromLegacy: boolean } | { ok: false; reason: string } {
   if (value.schemaVersion !== 1) return { ok: false, reason: 'sync.json: schemaVersion' };
   if (!isDatasetVersion(value.datasetVersion)) return { ok: false, reason: 'sync.json: datasetVersion' };
   if (!isContentHash(value.contentHash)) return { ok: false, reason: 'sync.json: contentHash' };
@@ -332,6 +332,7 @@ function validateSync(
   if (value.sourceFecha !== active.sourceFecha) {
     return { ok: false, reason: 'sync.json: sourceFecha distinta del manifiesto' };
   }
+  if (!isSourceFecha(value.sourceFecha)) return { ok: false, reason: 'sync.json: sourceFecha' };
   if (!isIsoDate(value.lastSuccessfulFetchAt)) return { ok: false, reason: 'sync.json: lastSuccessfulFetchAt' };
   if (!isIsoDate(value.contentPublishedAt)) return { ok: false, reason: 'sync.json: contentPublishedAt' };
   if (
@@ -358,13 +359,27 @@ function validateSync(
     seen.add(v);
     retained.push(v);
   }
+
+  const adaptedFromLegacy = value.lastObservedSourceFecha === undefined;
+  let lastObservedSourceFecha: string;
+  if (adaptedFromLegacy) {
+    // Formato ya publicado sin el campo: compatibilidad → sourceFecha del contenido.
+    lastObservedSourceFecha = value.sourceFecha;
+  } else if (!isSourceFecha(value.lastObservedSourceFecha)) {
+    return { ok: false, reason: 'sync.json: lastObservedSourceFecha' };
+  } else {
+    lastObservedSourceFecha = value.lastObservedSourceFecha;
+  }
+
   return {
     ok: true,
+    adaptedFromLegacy,
     sync: {
       schemaVersion: 1,
       datasetVersion: value.datasetVersion,
       contentHash: value.contentHash,
       sourceFecha: value.sourceFecha,
+      lastObservedSourceFecha,
       lastSuccessfulFetchAt: value.lastSuccessfulFetchAt,
       contentPublishedAt: value.contentPublishedAt,
       retainedVersions: retained,
@@ -639,7 +654,9 @@ export async function recoverPublishedState(
       cleanup();
       return fail(sync.reason, 'incoherent');
     }
-    const writtenSync = writeRel(SYNC_STATE_REL, normalizeBodyNewline(syncFetch.body));
+    // Escribir el sync normalizado (rellena lastObservedSourceFecha si faltaba).
+    // Solo toca sync.json mutable; no modifica archivos versionados.
+    const writtenSync = writeRel(SYNC_STATE_REL, `${JSON.stringify(sync.sync)}\n`);
     if (!writtenSync.ok) {
       cleanup();
       return fail(writtenSync.reason, 'unsafe_path');

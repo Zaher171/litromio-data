@@ -7,7 +7,7 @@ import {
   readLiveManifest,
   releaseLock,
 } from './publish-local.ts';
-import { updateMutableFreshness } from './sync-state.ts';
+import { readSyncState, updateMutableFreshness } from './sync-state.ts';
 import { parseAndValidateFuentePayload, parseFuenteFechaToEpoch, ValidationError } from './validate.ts';
 import type {
   PipelineConfig,
@@ -51,20 +51,21 @@ function isCompletenessAcceptable(
   return { ok: true };
 }
 
-function isStaleAgainstActive(
+/**
+ * ¿La consulta es más antigua que la última observación aceptada?
+ * Compara `Fecha` vía `parseFuenteFechaToEpoch` (Europe/Madrid); sin orden lexicográfico dd/mm.
+ * Si alguna fecha no parsea → se considera no aceptable (stale).
+ */
+function isStaleAgainstLastObserved(
   candidate: { sourceFecha: string; downloadedAt: string },
-  active: { sourceFecha: string; downloadedAt: string },
+  baseline: { lastObservedSourceFecha: string; downloadedAt: string },
 ): boolean {
   const cEpoch = parseFuenteFechaToEpoch(candidate.sourceFecha);
-  const aEpoch = parseFuenteFechaToEpoch(active.sourceFecha);
-  if (cEpoch !== null && aEpoch !== null) {
-    if (cEpoch < aEpoch) return true;
-    if (cEpoch > aEpoch) return false;
-  } else if (candidate.sourceFecha !== active.sourceFecha) {
-    if (candidate.sourceFecha < active.sourceFecha) return true;
-    if (candidate.sourceFecha > active.sourceFecha) return false;
-  }
-  return candidate.downloadedAt < active.downloadedAt;
+  const bEpoch = parseFuenteFechaToEpoch(baseline.lastObservedSourceFecha);
+  if (cEpoch === null || bEpoch === null) return true;
+  if (cEpoch < bEpoch) return true;
+  if (cEpoch > bEpoch) return false;
+  return candidate.downloadedAt < baseline.downloadedAt;
 }
 
 export interface RunPipelineInput {
@@ -163,10 +164,39 @@ export function runPipeline(input: RunPipelineInput): PipelineResult {
       });
     }
 
+    // Retrocesos de Fecha: antes de decidir sync vs publicación de contenido.
+    if (active) {
+      const syncState = readSyncState(store.liveDir);
+      const lastObservedSourceFecha =
+        syncState?.lastObservedSourceFecha ?? syncState?.sourceFecha ?? active.sourceFecha;
+      const baselineDownloadedAt =
+        syncState?.lastSuccessfulFetchAt ?? active.lastSuccessfulFetchAt ?? active.downloadedAt;
+      if (
+        isStaleAgainstLastObserved(
+          { sourceFecha: dataset.sourceFecha, downloadedAt: input.downloadedAt },
+          { lastObservedSourceFecha, downloadedAt: baselineDownloadedAt },
+        )
+      ) {
+        return finish({
+          outcome: 'abandoned_stale',
+          detail:
+            'La consulta es anterior a la última Fecha observada aceptada (o downloaded_at más antiguo a igualdad de Fecha)',
+          datasetVersion: null,
+          contentHash: dataset.contentHash,
+          activeDatasetVersion: active.datasetVersion,
+          metrics: {
+            ...emptyMetrics(Date.now() - t0),
+            stationCount: dataset.stations.length,
+            priceCount: dataset.prices.length,
+          },
+        });
+      }
+    }
+
     if (active && active.contentHash === dataset.contentHash) {
       const freshened = updateMutableFreshness(store.liveDir, {
         lastSuccessfulFetchAt: input.downloadedAt,
-        sourceFecha: dataset.sourceFecha,
+        observedSourceFecha: dataset.sourceFecha,
       });
       if (!freshened.ok) {
         return finish({
@@ -175,6 +205,11 @@ export function runPipeline(input: RunPipelineInput): PipelineResult {
           datasetVersion: active.datasetVersion,
           contentHash: dataset.contentHash,
           activeDatasetVersion: active.datasetVersion,
+          metrics: {
+            ...emptyMetrics(Date.now() - t0),
+            stationCount: dataset.stations.length,
+            priceCount: dataset.prices.length,
+          },
         });
       }
       return finish({
@@ -193,22 +228,6 @@ export function runPipeline(input: RunPipelineInput): PipelineResult {
           fileCount: active.fileCount,
           totalBytes: active.totalBytes,
         },
-      });
-    }
-
-    if (
-      active &&
-      isStaleAgainstActive(
-        { sourceFecha: dataset.sourceFecha, downloadedAt: input.downloadedAt },
-        active,
-      )
-    ) {
-      return finish({
-        outcome: 'abandoned_stale',
-        detail: 'La versión activa es más reciente (Fecha fuente o downloaded_at)',
-        datasetVersion: null,
-        contentHash: dataset.contentHash,
-        activeDatasetVersion: active.datasetVersion,
       });
     }
 

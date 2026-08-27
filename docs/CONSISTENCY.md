@@ -7,15 +7,18 @@
 - Punteros **mutables** con caché corta: `manifest.json`, `current.json`, `sync.json`.
 - **No** cambiar bytes bajo una URL ya publicada como inmutable.
 
-## Tres relojes (no confundir)
+## Relojes de sync (no confundir)
 
 | Campo | Significado |
 | --- | --- |
-| `sourceFecha` | Fecha/hora global de la respuesta oficial (`Fecha`) |
-| `lastSuccessfulFetchAt` | Última descarga **y** validación exitosa (aunque el hash no cambie) |
-| `contentPublishedAt` / `publishedAt` | Cuándo se publicó el **contenido** de ese `datasetVersion` |
+| `sourceFecha` | `Fecha` asociada al **contenido** activo (la misma que en el manifiesto de ese `datasetVersion`) |
+| `lastObservedSourceFecha` | `Fecha` de la fuente en la última consulta válida aceptada (puede ser posterior si solo cambió la cabecera) |
+| `lastSuccessfulFetchAt` | Instantánea ISO de esa descarga/validación |
+| `contentPublishedAt` / `publishedAt` | Cuándo se publicó el **contenido** de ese `datasetVersion` (no cambia en sync-only) |
 
-`sync.json` concentra la evidencia de consulta sin tocar el árbol `v/…`.
+`contentHash` y `datasetVersion` identifican el contenido normalizado **sin** fechas de consulta. El manifiesto versionado y las particiones son inmutables; su `sourceFecha` conserva la fecha de la fuente con la que se publicó ese contenido.
+
+`sync.json` concentra la evidencia de consulta sin tocar el árbol `v/…`. Una UI futura debe mostrar frescura con `lastSuccessfulFetchAt` / `lastObservedSourceFecha`, no asumir que `sourceFecha` avanza en cada ciclo.
 
 ## Publicación sin mezclar versiones
 
@@ -55,12 +58,14 @@ La app privada (otro origen) debe poder hacer `GET` de esos JSON gracias a CORS 
 
 ## Frescura sin cambio de precios
 
-Si `contentHash` coincide con el activo:
+Si `contentHash` coincide con el activo y la `Fecha` observada es **igual o posterior** a `lastObservedSourceFecha`:
 
 - Outcome: `synced_unchanged` (no “skip sin deploy”).
-- Se actualizan solo mutables: `sync.json`, `current.json`, `manifest.json` raíz.
+- Se actualizan solo mutables: `sync.json` (`lastSuccessfulFetchAt`, `lastObservedSourceFecha`), `current.json` / `manifest.json` raíz (frescura; `sourceFecha` del contenido se conserva).
 - **No** se mutan archivos bajo `v/{datasetVersion}/`.
 - `needsDeploy: true` — hay que publicar metadatos para que la frescura pública no parezca abandonada.
+
+Si la `Fecha` observada es **anterior** a `lastObservedSourceFecha` → `abandoned_stale` (antes de decidir sync vs publish). Comparación vía `parseFuenteFechaToEpoch` (Europe/Madrid), no lexicográfica.
 
 ### Publicaciones diarias (recalculo)
 
@@ -88,6 +93,7 @@ Los runners parten de disco vacío. La fuente de verdad publicada es la **URL p�
 - Descarga `current.json`, `manifest.json`, manifiesto versionado, `sync.json`, celdas activas y retenidas.
 - Verifica esquema, hashes, rutas canónicas y coherencia (mismo conjunto).
 - `sync.json` y `manifest.json` raíz son **obligatorios** (sin síntesis ni fallback).
+- Si `sync.json` publicado aún no trae `lastObservedSourceFecha`, se admite y se rellena con su `sourceFecha` (solo en el sync mutable local; no se tocan archivos versionados).
 - `_headers` se toma de `static/_headers` local, no del CDN.
 - Ante red, HTTP inesperado, esquema, ruta insegura o corrupción → **no publicar**.
 - Eso **no** es primer arranque.
@@ -97,7 +103,7 @@ Primer despliegue solo con `--allow-empty-publish` / `allow_empty_publish=true` 
 ## Ejecuciones concurrentes o antiguas
 
 - Lease TTL (15 min por defecto).
-- Si `sourceFecha`/`downloadedAt` son más antiguos que la activa → `abandoned_stale`.
+- Si `Fecha` / `downloadedAt` son más antiguos que la última observación aceptada → `abandoned_stale`.
 
 ## Descarga incompleta / fallo
 

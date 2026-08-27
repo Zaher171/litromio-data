@@ -4,6 +4,7 @@ export {
   parseFuenteFechaToEpoch,
   hashDataset,
   ValidationError,
+  FUENTE_TIME_ZONE,
 } from './validate.ts';
 export {
   cellForLatLon,
@@ -35,6 +36,8 @@ export {
 export {
   readSyncState,
   updateMutableFreshness,
+  buildSyncState,
+  normalizeSyncStateRecord,
   SYNC_STATE_REL,
   type SyncState,
 } from './sync-state.ts';

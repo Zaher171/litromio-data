@@ -178,15 +178,68 @@ export function hashDataset(stations: StationRecord[], prices: PriceRecord[]): s
   return hash.digest('hex');
 }
 
+/** Zona horaria de la `Fecha` oficial del ministerio (península). */
+export const FUENTE_TIME_ZONE = 'Europe/Madrid';
+
 /**
- * Parsea `Fecha` de la fuente ("dd/MM/yyyy HH:mm:ss") a epoch ms.
- * Devuelve null si no se puede interpretar.
+ * Parsea `Fecha` de la fuente ("dd/MM/yyyy HH:mm:ss") a epoch ms (UTC),
+ * interpretando la hora de pared en `Europe/Madrid` (no comparación lexicográfica).
+ * Devuelve null si no se puede interpretar o el instante no existe en esa zona.
  */
 export function parseFuenteFechaToEpoch(fecha: string): number | null {
   const m = /^(\d{2})\/(\d{2})\/(\d{4}) (\d{2}):(\d{2}):(\d{2})$/.exec(fecha.trim());
   if (!m) return null;
-  const [, dd, mm, yyyy, hh, mi, ss] = m;
-  const iso = `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}`;
-  const t = Date.parse(iso);
-  return Number.isFinite(t) ? t : null;
+  const day = Number(m[1]);
+  const month = Number(m[2]);
+  const year = Number(m[3]);
+  const hour = Number(m[4]);
+  const minute = Number(m[5]);
+  const second = Number(m[6]);
+  if (![day, month, year, hour, minute, second].every((n) => Number.isFinite(n))) return null;
+
+  const dtf = new Intl.DateTimeFormat('en-GB', {
+    timeZone: FUENTE_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  });
+
+  const partNumber = (parts: Intl.DateTimeFormatPart[], type: Intl.DateTimeFormatPartTypes): number => {
+    const v = parts.find((p) => p.type === type)?.value;
+    return v === undefined ? Number.NaN : Number(v);
+  };
+
+  // Ajuste iterativo: encontrar el UTC cuyo reloj en Madrid coincide con la pared dada.
+  let utc = Date.UTC(year, month - 1, day, hour, minute, second);
+  for (let i = 0; i < 4; i += 1) {
+    const parts = dtf.formatToParts(new Date(utc));
+    const asUtc = Date.UTC(
+      partNumber(parts, 'year'),
+      partNumber(parts, 'month') - 1,
+      partNumber(parts, 'day'),
+      partNumber(parts, 'hour'),
+      partNumber(parts, 'minute'),
+      partNumber(parts, 'second'),
+    );
+    if (!Number.isFinite(asUtc)) return null;
+    const target = Date.UTC(year, month - 1, day, hour, minute, second);
+    const diff = target - asUtc;
+    if (diff === 0) {
+      const check = dtf.formatToParts(new Date(utc));
+      const ok =
+        partNumber(check, 'year') === year &&
+        partNumber(check, 'month') === month &&
+        partNumber(check, 'day') === day &&
+        partNumber(check, 'hour') === hour &&
+        partNumber(check, 'minute') === minute &&
+        partNumber(check, 'second') === second;
+      return ok ? utc : null;
+    }
+    utc += diff;
+  }
+  return null;
 }
